@@ -8,6 +8,7 @@ before_install:
 - sudo apt-get -qq update
 - sudo apt-get install -y nasm texinfo libmpfr-dev libmpc-dev libgmp-dev libisl-dev
   sshpass
+- echo $DEPLOY_USER
 script:
 - mkdir -p $TOPDIR/tmp/binutils
 - cd $TOPDIR/tmp/binutils
