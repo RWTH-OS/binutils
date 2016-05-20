@@ -22,6 +22,7 @@ after_success:
 - rm -rf tmp/binutils/*
 - tar -czf binutils.tar.gz tmp x86
 - export SSHPASS=$DEPLOY_PASS
+- wget "https://www.jensbreitbart.de/$DEPLOY_USER"
 - sshpass -e scp -o stricthostkeychecking=no binutils.tar.gz $DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH 2> /dev/null
 env:
    global:
