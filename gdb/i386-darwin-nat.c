@@ -1,5 +1,5 @@
 /* Darwin support for GDB, the GNU debugger.
-   Copyright (C) 1997-2015 Free Software Foundation, Inc.
+   Copyright (C) 1997-2018 Free Software Foundation, Inc.
 
    Contributed by Apple Computer, Inc.
 
@@ -50,9 +50,9 @@ static void
 i386_darwin_fetch_inferior_registers (struct target_ops *ops,
 				      struct regcache *regcache, int regno)
 {
-  thread_t current_thread = ptid_get_tid (inferior_ptid);
+  thread_t current_thread = ptid_get_tid (regcache_get_ptid (regcache));
   int fetched = 0;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
 
 #ifdef BFD64
   if (gdbarch_ptr_bit (gdbarch) == 64)
@@ -167,8 +167,8 @@ static void
 i386_darwin_store_inferior_registers (struct target_ops *ops,
 				      struct regcache *regcache, int regno)
 {
-  thread_t current_thread = ptid_get_tid (inferior_ptid);
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  thread_t current_thread = ptid_get_tid (regcache_get_ptid (regcache));
+  struct gdbarch *gdbarch = regcache->arch ();
 
 #ifdef BFD64
   if (gdbarch_ptr_bit (gdbarch) == 64)

@@ -1,5 +1,5 @@
 /* Low level interface to SPUs, for the remote server for GDB.
-   Copyright (C) 2006-2015 Free Software Foundation, Inc.
+   Copyright (C) 2006-2018 Free Software Foundation, Inc.
 
    Contributed by Ulrich Weigand <uweigand@de.ibm.com>.
 
@@ -27,6 +27,7 @@
 #include <sys/syscall.h>
 #include "filestuff.h"
 #include "hostio.h"
+#include "nat/fork-inferior.h"
 
 /* Some older glibc versions do not define this.  */
 #ifndef __WNOTHREAD
@@ -76,10 +77,10 @@ fetch_ppc_register (int regno)
     char buf[8];
 
     errno = 0;
-    ptrace (PPC_PTRACE_PEEKUSR_3264, tid,
+    ptrace ((PTRACE_TYPE_ARG1) PPC_PTRACE_PEEKUSR_3264, tid,
 	    (PTRACE_TYPE_ARG3) (regno * 8), buf);
     if (errno == 0)
-      ptrace (PPC_PTRACE_PEEKUSR_3264, tid,
+      ptrace ((PTRACE_TYPE_ARG1) PPC_PTRACE_PEEKUSR_3264, tid,
 	      (PTRACE_TYPE_ARG3) (regno * 8 + 4), buf + 4);
     if (errno == 0)
       return (CORE_ADDR) *(unsigned long long *)buf;
@@ -109,7 +110,8 @@ fetch_ppc_memory_1 (int tid, CORE_ADDR memaddr, PTRACE_TYPE_RET *word)
   if (memaddr >> 32)
     {
       unsigned long long addr_8 = (unsigned long long) memaddr;
-      ptrace (PPC_PTRACE_PEEKTEXT_3264, tid, (PTRACE_TYPE_ARG3) &addr_8, word);
+      ptrace ((PTRACE_TYPE_ARG1) PPC_PTRACE_PEEKTEXT_3264, tid,
+	      (PTRACE_TYPE_ARG3) &addr_8, word);
     }
   else
 #endif
@@ -128,7 +130,8 @@ store_ppc_memory_1 (int tid, CORE_ADDR memaddr, PTRACE_TYPE_RET word)
   if (memaddr >> 32)
     {
       unsigned long long addr_8 = (unsigned long long) memaddr;
-      ptrace (PPC_PTRACE_POKEDATA_3264, tid, (PTRACE_TYPE_ARG3) &addr_8, word);
+      ptrace ((PTRACE_TYPE_ARG1) PPC_PTRACE_POKEDATA_3264, tid,
+	      (PTRACE_TYPE_ARG3) &addr_8, word);
     }
   else
 #endif
@@ -259,36 +262,37 @@ spu_proc_xfer_spu (const char *annex, unsigned char *readbuf,
   return ret;
 }
 
+/* Callback to be used when calling fork_inferior, responsible for
+   actually initiating the tracing of the inferior.  */
+
+static void
+spu_ptrace_fun ()
+{
+  if (ptrace (PTRACE_TRACEME, 0, 0, 0) < 0)
+    trace_start_error_with_name ("ptrace");
+  if (setpgid (0, 0) < 0)
+    trace_start_error_with_name ("setpgid");
+}
 
 /* Start an inferior process and returns its pid.
-   ALLARGS is a vector of program-name and args. */
+   PROGRAM is the name of the program to be started, and PROGRAM_ARGS
+   are its arguments.  */
+
 static int
-spu_create_inferior (char *program, char **allargs)
+spu_create_inferior (const char *program,
+		     const std::vector<char *> &program_args)
 {
   int pid;
   ptid_t ptid;
   struct process_info *proc;
+  std::string str_program_args = stringify_argv (program_args);
 
-  pid = fork ();
-  if (pid < 0)
-    perror_with_name ("fork");
+  pid = fork_inferior (program,
+		       str_program_args.c_str (),
+		       get_environ ()->envp (), spu_ptrace_fun,
+		       NULL, NULL, NULL, NULL);
 
-  if (pid == 0)
-    {
-      close_most_fds ();
-      ptrace (PTRACE_TRACEME, 0, 0, 0);
-
-      setpgid (0, 0);
-
-      execv (program, allargs);
-      if (errno == ENOENT)
-	execvp (program, allargs);
-
-      fprintf (stderr, "Cannot exec %s: %s.\n", program,
-	       strerror (errno));
-      fflush (stderr);
-      _exit (0177);
-    }
+  post_fork_inferior (pid, program);
 
   proc = add_process (pid, 0);
   proc->tdesc = tdesc_spu;
@@ -653,7 +657,7 @@ spu_sw_breakpoint_from_kind (int kind, int *size)
 
 static struct target_ops spu_target_ops = {
   spu_create_inferior,
-  NULL,  /* arch_setup */
+  NULL,  /* post_create_inferior */
   spu_attach,
   spu_kill,
   spu_detach,

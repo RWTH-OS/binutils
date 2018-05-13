@@ -1,6 +1,6 @@
 /* Multi-process/thread control for GDB, the GNU debugger.
 
-   Copyright (C) 1986-2015 Free Software Foundation, Inc.
+   Copyright (C) 1986-2018 Free Software Foundation, Inc.
 
    Contributed by Lynx Real-Time Systems, Inc.  Los Gatos, CA.
 
@@ -30,7 +30,6 @@
 #include "command.h"
 #include "gdbcmd.h"
 #include "regcache.h"
-#include "gdb.h"
 #include "btrace.h"
 
 #include <ctype.h>
@@ -43,12 +42,11 @@
 #include "gdb_regex.h"
 #include "cli/cli-utils.h"
 #include "thread-fsm.h"
+#include "tid-parse.h"
+#include <algorithm>
+#include "common/gdb_optional.h"
 
 /* Definition of struct thread_info exported to gdbthread.h.  */
-
-/* Prototypes for exported functions.  */
-
-void _initialize_thread (void);
 
 /* Prototypes for local functions.  */
 
@@ -62,22 +60,29 @@ static int highest_thread_num;
    spawned new threads we haven't heard of yet.  */
 static int threads_executing;
 
-static void thread_apply_all_command (char *, int);
 static int thread_alive (struct thread_info *);
-static void info_threads_command (char *, int);
-static void thread_apply_command (char *, int);
-static void restore_current_thread (ptid_t);
 
-/* Data to cleanup thread array.  */
+/* RAII type used to increase / decrease the refcount of each thread
+   in a given list of threads.  */
 
-struct thread_array_cleanup
+class scoped_inc_dec_ref
 {
-  /* Array of thread pointers used to set
-     reference count.  */
-  struct thread_info **tp_array;
+public:
+  explicit scoped_inc_dec_ref (const std::vector<thread_info *> &thrds)
+    : m_thrds (thrds)
+  {
+    for (thread_info *thr : m_thrds)
+      thr->incref ();
+  }
 
-  /* Thread count in the array.  */
-  int count;
+  ~scoped_inc_dec_ref ()
+  {
+    for (thread_info *thr : m_thrds)
+      thr->decref ();
+  }
+
+private:
+  const std::vector<thread_info *> &m_thrds;
 };
 
 
@@ -149,7 +154,7 @@ thread_has_single_step_breakpoints_set (struct thread_info *tp)
 
 int
 thread_has_single_step_breakpoint_here (struct thread_info *tp,
-					struct address_space *aspace,
+					const address_space *aspace,
 					CORE_ADDR addr)
 {
   struct breakpoint *ss_bps = tp->control.single_step_breakpoints;
@@ -165,7 +170,7 @@ thread_cancel_execution_command (struct thread_info *thr)
 {
   if (thr->thread_fsm != NULL)
     {
-      thread_fsm_clean_up (thr->thread_fsm);
+      thread_fsm_clean_up (thr->thread_fsm, thr);
       thread_fsm_delete (thr->thread_fsm);
       thr->thread_fsm = NULL;
     }
@@ -182,7 +187,7 @@ clear_thread_inferior_resources (struct thread_info *tp)
   delete_at_next_stop (&tp->control.exception_resume_breakpoint);
   delete_at_next_stop (&tp->control.single_step_breakpoints);
 
-  delete_longjmp_breakpoint_at_next_stop (tp->num);
+  delete_longjmp_breakpoint_at_next_stop (tp->global_num);
 
   bpstat_clear (&tp->control.stop_bpstat);
 
@@ -191,19 +196,25 @@ clear_thread_inferior_resources (struct thread_info *tp)
   thread_cancel_execution_command (tp);
 }
 
-static void
-free_thread (struct thread_info *tp)
-{
-  if (tp->priv)
-    {
-      if (tp->private_dtor)
-	tp->private_dtor (tp->priv);
-      else
-	xfree (tp->priv);
-    }
+/* Set the TP's state as exited.  */
 
-  xfree (tp->name);
-  xfree (tp);
+static void
+set_thread_exited (thread_info *tp, int silent)
+{
+  /* Dead threads don't need to step-over.  Remove from queue.  */
+  if (tp->step_over_next != NULL)
+    thread_step_over_chain_remove (tp);
+
+  if (tp->state != THREAD_EXITED)
+    {
+      observer_notify_thread_exit (tp, silent);
+
+      /* Tag it as exited.  */
+      tp->state = THREAD_EXITED;
+
+      /* Clear breakpoints, etc. associated with this thread.  */
+      clear_thread_inferior_resources (tp);
+    }
 }
 
 void
@@ -219,30 +230,34 @@ init_thread_list (void)
   for (tp = thread_list; tp; tp = tpnext)
     {
       tpnext = tp->next;
-      free_thread (tp);
+      if (tp->deletable ())
+	delete tp;
+      else
+	set_thread_exited (tp, 1);
     }
 
   thread_list = NULL;
   threads_executing = 0;
 }
 
-/* Allocate a new thread with target id PTID and add it to the thread
-   list.  */
+/* Allocate a new thread of inferior INF with target id PTID and add
+   it to the thread list.  */
 
 static struct thread_info *
-new_thread (ptid_t ptid)
+new_thread (struct inferior *inf, ptid_t ptid)
 {
-  struct thread_info *tp = XCNEW (struct thread_info);
+  thread_info *tp = new thread_info (inf, ptid);
 
-  tp->ptid = ptid;
-  tp->num = ++highest_thread_num;
-  tp->next = thread_list;
-  thread_list = tp;
+  if (thread_list == NULL)
+    thread_list = tp;
+  else
+    {
+      struct thread_info *last;
 
-  /* Nothing to follow yet.  */
-  tp->pending_follow.kind = TARGET_WAITKIND_SPURIOUS;
-  tp->state = THREAD_STOPPED;
-  tp->suspend.waitstatus.kind = TARGET_WAITKIND_IGNORE;
+      for (last = thread_list; last->next != NULL; last = last->next)
+	;
+      last->next = tp;
+    }
 
   return tp;
 }
@@ -251,6 +266,8 @@ struct thread_info *
 add_thread_silent (ptid_t ptid)
 {
   struct thread_info *tp;
+  struct inferior *inf = find_inferior_ptid (ptid);
+  gdb_assert (inf != NULL);
 
   tp = find_thread_ptid (ptid);
   if (tp)
@@ -266,9 +283,9 @@ add_thread_silent (ptid_t ptid)
 	 to it, delete the original thread, reset the new thread's
 	 ptid, and switch to it.  */
 
-      if (ptid_equal (inferior_ptid, ptid))
+      if (inferior_ptid == ptid)
 	{
-	  tp = new_thread (null_ptid);
+	  tp = new_thread (inf, null_ptid);
 
 	  /* Make switch_to_thread not read from the thread.  */
 	  tp->state = THREAD_EXITED;
@@ -292,18 +309,18 @@ add_thread_silent (ptid_t ptid)
 	delete_thread (ptid);
     }
 
-  tp = new_thread (ptid);
+  tp = new_thread (inf, ptid);
   observer_notify_new_thread (tp);
 
   return tp;
 }
 
 struct thread_info *
-add_thread_with_info (ptid_t ptid, struct private_thread_info *priv)
+add_thread_with_info (ptid_t ptid, private_thread_info *priv)
 {
   struct thread_info *result = add_thread_silent (ptid);
 
-  result->priv = priv;
+  result->priv.reset (priv);
 
   if (print_thread_events)
     printf_unfiltered (_("[New %s]\n"), target_pid_to_str (ptid));
@@ -316,6 +333,27 @@ struct thread_info *
 add_thread (ptid_t ptid)
 {
   return add_thread_with_info (ptid, NULL);
+}
+
+private_thread_info::~private_thread_info () = default;
+
+thread_info::thread_info (struct inferior *inf_, ptid_t ptid_)
+  : ptid (ptid_), inf (inf_)
+{
+  gdb_assert (inf_ != NULL);
+
+  this->global_num = ++highest_thread_num;
+  this->per_inf_num = ++inf_->highest_thread_num;
+
+  /* Nothing to follow yet.  */
+  memset (&this->pending_follow, 0, sizeof (this->pending_follow));
+  this->pending_follow.kind = TARGET_WAITKIND_SPURIOUS;
+  this->suspend.waitstatus.kind = TARGET_WAITKIND_IGNORE;
+}
+
+thread_info::~thread_info ()
+{
+  xfree (this->name);
 }
 
 /* Add TP to the end of the step-over chain LIST_P.  */
@@ -408,51 +446,26 @@ delete_thread_1 (ptid_t ptid, int silent)
   tpprev = NULL;
 
   for (tp = thread_list; tp; tpprev = tp, tp = tp->next)
-    if (ptid_equal (tp->ptid, ptid))
+    if (tp->ptid == ptid)
       break;
 
   if (!tp)
     return;
 
-  /* Dead threads don't need to step-over.  Remove from queue.  */
-  if (tp->step_over_next != NULL)
-    thread_step_over_chain_remove (tp);
+  set_thread_exited (tp, silent);
 
-  /* If this is the current thread, or there's code out there that
-     relies on it existing (refcount > 0) we can't delete yet.  Mark
-     it as exited, and notify it.  */
-  if (tp->refcount > 0
-      || ptid_equal (tp->ptid, inferior_ptid))
+  if (!tp->deletable ())
     {
-      if (tp->state != THREAD_EXITED)
-	{
-	  observer_notify_thread_exit (tp, silent);
-
-	  /* Tag it as exited.  */
-	  tp->state = THREAD_EXITED;
-
-	  /* Clear breakpoints, etc. associated with this thread.  */
-	  clear_thread_inferior_resources (tp);
-	}
-
        /* Will be really deleted some other time.  */
        return;
      }
-
-  /* Notify thread exit, but only if we haven't already.  */
-  if (tp->state != THREAD_EXITED)
-    observer_notify_thread_exit (tp, silent);
-
-  /* Tag it as exited.  */
-  tp->state = THREAD_EXITED;
-  clear_thread_inferior_resources (tp);
 
   if (tpprev)
     tpprev->next = tp->next;
   else
     thread_list = tp->next;
 
-  free_thread (tp);
+  delete tp;
 }
 
 /* Delete thread PTID and notify of thread exit.  If this is
@@ -472,28 +485,52 @@ delete_thread_silent (ptid_t ptid)
 }
 
 struct thread_info *
-find_thread_id (int num)
+find_thread_global_id (int global_id)
 {
   struct thread_info *tp;
 
   for (tp = thread_list; tp; tp = tp->next)
-    if (tp->num == num)
+    if (tp->global_num == global_id)
+      return tp;
+
+  return NULL;
+}
+
+static struct thread_info *
+find_thread_id (struct inferior *inf, int thr_num)
+{
+  struct thread_info *tp;
+
+  for (tp = thread_list; tp; tp = tp->next)
+    if (tp->inf == inf && tp->per_inf_num == thr_num)
       return tp;
 
   return NULL;
 }
 
 /* Find a thread_info by matching PTID.  */
+
 struct thread_info *
 find_thread_ptid (ptid_t ptid)
 {
   struct thread_info *tp;
 
   for (tp = thread_list; tp; tp = tp->next)
-    if (ptid_equal (tp->ptid, ptid))
+    if (tp->ptid == ptid)
       return tp;
 
   return NULL;
+}
+
+/* See gdbthread.h.  */
+
+struct thread_info *
+find_thread_by_handle (struct value *thread_handle, struct inferior *inf)
+{
+  return target_thread_handle_to_thread_info
+	   (value_contents_all (thread_handle),
+	    TYPE_LENGTH (value_type (thread_handle)),
+	    inf);
 }
 
 /*
@@ -502,11 +539,11 @@ find_thread_ptid (ptid_t ptid)
  * Calls a callback function once for each thread, so long as
  * the callback function returns false.  If the callback function
  * returns true, the iteration will end and the current thread
- * will be returned.  This can be useful for implementing a 
+ * will be returned.  This can be useful for implementing a
  * search for a thread with arbitrary attributes, or for applying
  * some operation to every thread.
  *
- * FIXME: some of the existing functionality, such as 
+ * FIXME: some of the existing functionality, such as
  * "Thread apply all", might be rewritten using this functionality.
  */
 
@@ -535,42 +572,56 @@ thread_count (void)
   for (tp = thread_list; tp; tp = tp->next)
     ++result;
 
-  return result;  
+  return result;
+}
+
+/* Return the number of non-exited threads in the thread list.  */
+
+static int
+live_threads_count (void)
+{
+  int result = 0;
+  struct thread_info *tp;
+
+  ALL_NON_EXITED_THREADS (tp)
+    ++result;
+
+  return result;
 }
 
 int
-valid_thread_id (int num)
+valid_global_thread_id (int global_id)
 {
   struct thread_info *tp;
 
   for (tp = thread_list; tp; tp = tp->next)
-    if (tp->num == num)
+    if (tp->global_num == global_id)
       return 1;
 
   return 0;
 }
 
 int
-pid_to_thread_id (ptid_t ptid)
+ptid_to_global_thread_id (ptid_t ptid)
 {
   struct thread_info *tp;
 
   for (tp = thread_list; tp; tp = tp->next)
-    if (ptid_equal (tp->ptid, ptid))
-      return tp->num;
+    if (tp->ptid == ptid)
+      return tp->global_num;
 
   return 0;
 }
 
 ptid_t
-thread_id_to_pid (int num)
+global_thread_id_to_ptid (int global_id)
 {
-  struct thread_info *thread = find_thread_id (num);
+  struct thread_info *thread = find_thread_global_id (global_id);
 
   if (thread)
     return thread->ptid;
   else
-    return pid_to_ptid (-1);
+    return minus_one_ptid;
 }
 
 int
@@ -579,7 +630,7 @@ in_thread_list (ptid_t ptid)
   struct thread_info *tp;
 
   for (tp = thread_list; tp; tp = tp->next)
-    if (ptid_equal (tp->ptid, ptid))
+    if (tp->ptid == ptid)
       return 1;
 
   return 0;			/* Never heard of 'im.  */
@@ -595,7 +646,7 @@ first_thread_of_process (int pid)
 
   for (tp = thread_list; tp; tp = tp->next)
     if (pid == -1 || ptid_get_pid (tp->ptid) == pid)
-      if (ret == NULL || tp->num < ret->num)
+      if (ret == NULL || tp->global_num < ret->global_num)
 	ret = tp;
 
   return ret;
@@ -657,51 +708,6 @@ any_live_thread_of_process (int pid)
 
   /* Otherwise, just return an executing thread, if any.  */
   return tp_executing;
-}
-
-/* Print a list of thread ids currently known, and the total number of
-   threads.  To be used from within catch_errors.  */
-static int
-do_captured_list_thread_ids (struct ui_out *uiout, void *arg)
-{
-  struct thread_info *tp;
-  int num = 0;
-  struct cleanup *cleanup_chain;
-  int current_thread = -1;
-
-  update_thread_list ();
-
-  cleanup_chain = make_cleanup_ui_out_tuple_begin_end (uiout, "thread-ids");
-
-  for (tp = thread_list; tp; tp = tp->next)
-    {
-      if (tp->state == THREAD_EXITED)
-	continue;
-
-      if (ptid_equal (tp->ptid, inferior_ptid))
-	current_thread = tp->num;
-
-      num++;
-      ui_out_field_int (uiout, "thread-id", tp->num);
-    }
-
-  do_cleanups (cleanup_chain);
-
-  if (current_thread != -1)
-    ui_out_field_int (uiout, "current-thread-id", current_thread);
-  ui_out_field_int (uiout, "number-of-threads", num);
-  return GDB_RC_OK;
-}
-
-/* Official gdblib interface function to get a list of thread ids and
-   the total number.  */
-enum gdb_rc
-gdb_list_thread_ids (struct ui_out *uiout, char **error_message)
-{
-  if (catch_exceptions_with_msg (uiout, do_captured_list_thread_ids, NULL,
-				 error_message, RETURN_MASK_ALL) < 0)
-    return GDB_RC_FAIL;
-  return GDB_RC_OK;
 }
 
 /* Return true if TP is an active thread.  */
@@ -869,7 +875,7 @@ void
 set_resumed (ptid_t ptid, int resumed)
 {
   struct thread_info *tp;
-  int all = ptid_equal (ptid, minus_one_ptid);
+  int all = ptid == minus_one_ptid;
 
   if (all || ptid_is_pid (ptid))
     {
@@ -913,11 +919,11 @@ void
 set_running (ptid_t ptid, int running)
 {
   struct thread_info *tp;
-  int all = ptid_equal (ptid, minus_one_ptid);
+  int all = ptid == minus_one_ptid;
   int any_started = 0;
 
-  /* We try not to notify the observer if no thread has actually changed 
-     the running state -- merely to reduce the number of messages to 
+  /* We try not to notify the observer if no thread has actually changed
+     the running state -- merely to reduce the number of messages to
      frontend.  Frontend is supposed to handle multiple *running just fine.  */
   if (all || ptid_is_pid (ptid))
     {
@@ -985,7 +991,7 @@ void
 set_executing (ptid_t ptid, int executing)
 {
   struct thread_info *tp;
-  int all = ptid_equal (ptid, minus_one_ptid);
+  int all = ptid == minus_one_ptid;
 
   if (all || ptid_is_pid (ptid))
     {
@@ -1005,7 +1011,7 @@ set_executing (ptid_t ptid, int executing)
     threads_executing = 1;
   /* Only clear the flag if the caller is telling us everything is
      stopped.  */
-  else if (ptid_equal (minus_one_ptid, ptid))
+  else if (minus_one_ptid == ptid)
     threads_executing = 0;
 }
 
@@ -1021,7 +1027,7 @@ void
 set_stop_requested (ptid_t ptid, int stop)
 {
   struct thread_info *tp;
-  int all = ptid_equal (ptid, minus_one_ptid);
+  int all = ptid == minus_one_ptid;
 
   if (all || ptid_is_pid (ptid))
     {
@@ -1049,14 +1055,14 @@ finish_thread_state (ptid_t ptid)
   int all;
   int any_started = 0;
 
-  all = ptid_equal (ptid, minus_one_ptid);
+  all = ptid == minus_one_ptid;
 
   if (all || ptid_is_pid (ptid))
     {
       for (tp = thread_list; tp; tp = tp->next)
 	{
- 	  if (tp->state == THREAD_EXITED)
-  	    continue;
+	  if (tp->state == THREAD_EXITED)
+	    continue;
 	  if (all || ptid_get_pid (ptid) == ptid_get_pid (tp->ptid))
 	    {
 	      if (set_running_thread (tp, tp->executing))
@@ -1089,6 +1095,48 @@ finish_thread_state_cleanup (void *arg)
   finish_thread_state (*ptid_p);
 }
 
+/* See gdbthread.h.  */
+
+void
+validate_registers_access (void)
+{
+  /* No selected thread, no registers.  */
+  if (inferior_ptid == null_ptid)
+    error (_("No thread selected."));
+
+  /* Don't try to read from a dead thread.  */
+  if (is_exited (inferior_ptid))
+    error (_("The current thread has terminated"));
+
+  /* ... or from a spinning thread.  FIXME: This isn't actually fully
+     correct.  It'll allow an user-requested access (e.g., "print $pc"
+     at the prompt) when a thread is not executing for some internal
+     reason, but is marked running from the user's perspective.  E.g.,
+     the thread is waiting for its turn in the step-over queue.  */
+  if (is_executing (inferior_ptid))
+    error (_("Selected thread is running."));
+}
+
+/* See gdbthread.h.  */
+
+bool
+can_access_registers_ptid (ptid_t ptid)
+{
+  /* No thread, no registers.  */
+  if (ptid == null_ptid)
+    return false;
+
+  /* Don't try to read from a dead thread.  */
+  if (is_exited (ptid))
+    return false;
+
+  /* ... or from a spinning thread.  FIXME: see validate_registers_access.  */
+  if (is_executing (ptid))
+    return false;
+
+  return true;
+}
+
 int
 pc_in_thread_step_range (CORE_ADDR pc, struct thread_info *thread)
 {
@@ -1096,261 +1144,310 @@ pc_in_thread_step_range (CORE_ADDR pc, struct thread_info *thread)
 	  && pc < thread->control.step_range_end);
 }
 
-/* Prints the list of threads and their details on UIOUT.
-   This is a version of 'info_threads_command' suitable for
-   use from MI.
-   If REQUESTED_THREAD is not -1, it's the GDB id of the thread
-   that should be printed.  Otherwise, all threads are
-   printed.
-   If PID is not -1, only print threads from the process PID.
-   Otherwise, threads from all attached PIDs are printed.
-   If both REQUESTED_THREAD and PID are not -1, then the thread
-   is printed if it belongs to the specified process.  Otherwise,
-   an error is raised.  */
-void
-print_thread_info (struct ui_out *uiout, char *requested_threads, int pid)
+/* Helper for print_thread_info.  Returns true if THR should be
+   printed.  If REQUESTED_THREADS, a list of GDB ids/ranges, is not
+   NULL, only print THR if its ID is included in the list.  GLOBAL_IDS
+   is true if REQUESTED_THREADS is list of global IDs, false if a list
+   of per-inferior thread ids.  If PID is not -1, only print THR if it
+   is a thread from the process PID.  Otherwise, threads from all
+   attached PIDs are printed.  If both REQUESTED_THREADS is not NULL
+   and PID is not -1, then the thread is printed if it belongs to the
+   specified process.  Otherwise, an error is raised.  */
+
+static int
+should_print_thread (const char *requested_threads, int default_inf_num,
+		     int global_ids, int pid, struct thread_info *thr)
+{
+  if (requested_threads != NULL && *requested_threads != '\0')
+    {
+      int in_list;
+
+      if (global_ids)
+	in_list = number_is_in_list (requested_threads, thr->global_num);
+      else
+	in_list = tid_is_in_list (requested_threads, default_inf_num,
+				  thr->inf->num, thr->per_inf_num);
+      if (!in_list)
+	return 0;
+    }
+
+  if (pid != -1 && ptid_get_pid (thr->ptid) != pid)
+    {
+      if (requested_threads != NULL && *requested_threads != '\0')
+	error (_("Requested thread not found in requested process"));
+      return 0;
+    }
+
+  if (thr->state == THREAD_EXITED)
+    return 0;
+
+  return 1;
+}
+
+/* Like print_thread_info, but in addition, GLOBAL_IDS indicates
+   whether REQUESTED_THREADS is a list of global or per-inferior
+   thread ids.  */
+
+static void
+print_thread_info_1 (struct ui_out *uiout, const char *requested_threads,
+		     int global_ids, int pid,
+		     int show_global_ids)
 {
   struct thread_info *tp;
   ptid_t current_ptid;
-  struct cleanup *old_chain;
-  char *extra_info, *name, *target_id;
-  int current_thread = -1;
+  const char *extra_info, *name, *target_id;
+  struct inferior *inf;
+  int default_inf_num = current_inferior ()->num;
 
   update_thread_list ();
   current_ptid = inferior_ptid;
 
-  /* We'll be switching threads temporarily.  */
-  old_chain = make_cleanup_restore_current_thread ();
+  {
+    /* For backward compatibility, we make a list for MI.  A table is
+       preferable for the CLI, though, because it shows table
+       headers.  */
+    gdb::optional<ui_out_emit_list> list_emitter;
+    gdb::optional<ui_out_emit_table> table_emitter;
 
-  /* For backward compatibility, we make a list for MI.  A table is
-     preferable for the CLI, though, because it shows table
-     headers.  */
-  if (ui_out_is_mi_like_p (uiout))
-    make_cleanup_ui_out_list_begin_end (uiout, "threads");
-  else
-    {
-      int n_threads = 0;
+    if (uiout->is_mi_like_p ())
+      list_emitter.emplace (uiout, "threads");
+    else
+      {
+	int n_threads = 0;
 
-      for (tp = thread_list; tp; tp = tp->next)
-	{
-	  if (!number_is_in_list (requested_threads, tp->num))
-	    continue;
+	for (tp = thread_list; tp; tp = tp->next)
+	  {
+	    if (!should_print_thread (requested_threads, default_inf_num,
+				      global_ids, pid, tp))
+	      continue;
 
-	  if (pid != -1 && ptid_get_pid (tp->ptid) != pid)
-	    continue;
+	    ++n_threads;
+	  }
 
-	  if (tp->state == THREAD_EXITED)
-	    continue;
+	if (n_threads == 0)
+	  {
+	    if (requested_threads == NULL || *requested_threads == '\0')
+	      uiout->message (_("No threads.\n"));
+	    else
+	      uiout->message (_("No threads match '%s'.\n"),
+			      requested_threads);
+	    return;
+	  }
 
-	  ++n_threads;
-	}
+	table_emitter.emplace (uiout, show_global_ids ? 5 : 4,
+			       n_threads, "threads");
 
-      if (n_threads == 0)
-	{
-	  if (requested_threads == NULL || *requested_threads == '\0')
-	    ui_out_message (uiout, 0, _("No threads.\n"));
-	  else
-	    ui_out_message (uiout, 0, _("No threads match '%s'.\n"),
-			    requested_threads);
-	  do_cleanups (old_chain);
-	  return;
-	}
+	uiout->table_header (1, ui_left, "current", "");
+	uiout->table_header (4, ui_left, "id-in-tg", "Id");
+	if (show_global_ids)
+	  uiout->table_header (4, ui_left, "id", "GId");
+	uiout->table_header (17, ui_left, "target-id", "Target Id");
+	uiout->table_header (1, ui_left, "frame", "Frame");
+	uiout->table_body ();
+      }
 
-      make_cleanup_ui_out_table_begin_end (uiout, 4, n_threads, "threads");
+    /* We'll be switching threads temporarily.  */
+    scoped_restore_current_thread restore_thread;
 
-      ui_out_table_header (uiout, 1, ui_left, "current", "");
-      ui_out_table_header (uiout, 4, ui_left, "id", "Id");
-      ui_out_table_header (uiout, 17, ui_left, "target-id", "Target Id");
-      ui_out_table_header (uiout, 1, ui_left, "frame", "Frame");
-      ui_out_table_body (uiout);
-    }
+    ALL_THREADS_BY_INFERIOR (inf, tp)
+      {
+	int core;
 
-  for (tp = thread_list; tp; tp = tp->next)
-    {
-      struct cleanup *chain2;
-      int core;
-
-      if (!number_is_in_list (requested_threads, tp->num))
-	continue;
-
-      if (pid != -1 && ptid_get_pid (tp->ptid) != pid)
-	{
-	  if (requested_threads != NULL && *requested_threads != '\0')
-	    error (_("Requested thread not found in requested process"));
+	if (!should_print_thread (requested_threads, default_inf_num,
+				  global_ids, pid, tp))
 	  continue;
-	}
 
-      if (ptid_equal (tp->ptid, current_ptid))
-	current_thread = tp->num;
+	ui_out_emit_tuple tuple_emitter (uiout, NULL);
 
-      if (tp->state == THREAD_EXITED)
-	continue;
+	if (!uiout->is_mi_like_p ())
+	  {
+	    if (tp->ptid == current_ptid)
+	      uiout->field_string ("current", "*");
+	    else
+	      uiout->field_skip ("current");
 
-      chain2 = make_cleanup_ui_out_tuple_begin_end (uiout, NULL);
+	    uiout->field_string ("id-in-tg", print_thread_id (tp));
+	  }
 
-      if (ui_out_is_mi_like_p (uiout))
-	{
-	  /* Compatibility.  */
-	  if (ptid_equal (tp->ptid, current_ptid))
-	    ui_out_text (uiout, "* ");
-	  else
-	    ui_out_text (uiout, "  ");
-	}
-      else
-	{
-	  if (ptid_equal (tp->ptid, current_ptid))
-	    ui_out_field_string (uiout, "current", "*");
-	  else
-	    ui_out_field_skip (uiout, "current");
-	}
+	if (show_global_ids || uiout->is_mi_like_p ())
+	  uiout->field_int ("id", tp->global_num);
 
-      ui_out_field_int (uiout, "id", tp->num);
+	/* For the CLI, we stuff everything into the target-id field.
+	   This is a gross hack to make the output come out looking
+	   correct.  The underlying problem here is that ui-out has no
+	   way to specify that a field's space allocation should be
+	   shared by several fields.  For MI, we do the right thing
+	   instead.  */
 
-      /* For the CLI, we stuff everything into the target-id field.
-	 This is a gross hack to make the output come out looking
-	 correct.  The underlying problem here is that ui-out has no
-	 way to specify that a field's space allocation should be
-	 shared by several fields.  For MI, we do the right thing
-	 instead.  */
+	target_id = target_pid_to_str (tp->ptid);
+	extra_info = target_extra_thread_info (tp);
+	name = tp->name ? tp->name : target_thread_name (tp);
 
-      target_id = target_pid_to_str (tp->ptid);
-      extra_info = target_extra_thread_info (tp);
-      name = tp->name ? tp->name : target_thread_name (tp);
+	if (uiout->is_mi_like_p ())
+	  {
+	    uiout->field_string ("target-id", target_id);
+	    if (extra_info)
+	      uiout->field_string ("details", extra_info);
+	    if (name)
+	      uiout->field_string ("name", name);
+	  }
+	else
+	  {
+	    std::string contents;
 
-      if (ui_out_is_mi_like_p (uiout))
-	{
-	  ui_out_field_string (uiout, "target-id", target_id);
-	  if (extra_info)
-	    ui_out_field_string (uiout, "details", extra_info);
-	  if (name)
-	    ui_out_field_string (uiout, "name", name);
-	}
-      else
-	{
-	  struct cleanup *str_cleanup;
-	  char *contents;
+	    if (extra_info && name)
+	      contents = string_printf ("%s \"%s\" (%s)", target_id,
+					name, extra_info);
+	    else if (extra_info)
+	      contents = string_printf ("%s (%s)", target_id, extra_info);
+	    else if (name)
+	      contents = string_printf ("%s \"%s\"", target_id, name);
+	    else
+	      contents = target_id;
 
-	  if (extra_info && name)
-	    contents = xstrprintf ("%s \"%s\" (%s)", target_id,
-				   name, extra_info);
-	  else if (extra_info)
-	    contents = xstrprintf ("%s (%s)", target_id, extra_info);
-	  else if (name)
-	    contents = xstrprintf ("%s \"%s\"", target_id, name);
-	  else
-	    contents = xstrdup (target_id);
-	  str_cleanup = make_cleanup (xfree, contents);
+	    uiout->field_string ("target-id", contents.c_str ());
+	  }
 
-	  ui_out_field_string (uiout, "target-id", contents);
-	  do_cleanups (str_cleanup);
-	}
+	if (tp->state == THREAD_RUNNING)
+	  uiout->text ("(running)\n");
+	else
+	  {
+	    /* The switch below puts us at the top of the stack (leaf
+	       frame).  */
+	    switch_to_thread (tp->ptid);
+	    print_stack_frame (get_selected_frame (NULL),
+			       /* For MI output, print frame level.  */
+			       uiout->is_mi_like_p (),
+			       LOCATION, 0);
+	  }
 
-      if (tp->state == THREAD_RUNNING)
-	ui_out_text (uiout, "(running)\n");
-      else
-	{
-	  /* The switch below puts us at the top of the stack (leaf
-	     frame).  */
-	  switch_to_thread (tp->ptid);
-	  print_stack_frame (get_selected_frame (NULL),
-			     /* For MI output, print frame level.  */
-			     ui_out_is_mi_like_p (uiout),
-			     LOCATION, 0);
-	}
+	if (uiout->is_mi_like_p ())
+	  {
+	    const char *state = "stopped";
 
-      if (ui_out_is_mi_like_p (uiout))
-	{
-	  char *state = "stopped";
+	    if (tp->state == THREAD_RUNNING)
+	      state = "running";
+	    uiout->field_string ("state", state);
+	  }
 
-	  if (tp->state == THREAD_RUNNING)
-	    state = "running";
-	  ui_out_field_string (uiout, "state", state);
-	}
+	core = target_core_of_thread (tp->ptid);
+	if (uiout->is_mi_like_p () && core != -1)
+	  uiout->field_int ("core", core);
+      }
 
-      core = target_core_of_thread (tp->ptid);
-      if (ui_out_is_mi_like_p (uiout) && core != -1)
-	ui_out_field_int (uiout, "core", core);
-
-      do_cleanups (chain2);
-    }
-
-  /* Restores the current thread and the frame selected before
-     the "info threads" command.  */
-  do_cleanups (old_chain);
+    /* This end scope restores the current thread and the frame
+       selected before the "info threads" command, and it finishes the
+       ui-out list or table.  */
+  }
 
   if (pid == -1 && requested_threads == NULL)
     {
-      gdb_assert (current_thread != -1
-		  || !thread_list
-		  || ptid_equal (inferior_ptid, null_ptid));
-      if (current_thread != -1 && ui_out_is_mi_like_p (uiout))
-	ui_out_field_int (uiout, "current-thread-id", current_thread);
+      if (uiout->is_mi_like_p ()
+	  && inferior_ptid != null_ptid)
+	{
+	  int num = ptid_to_global_thread_id (inferior_ptid);
 
-      if (current_thread != -1 && is_exited (current_ptid))
-	ui_out_message (uiout, 0, "\n\
-The current thread <Thread ID %d> has terminated.  See `help thread'.\n",
-			current_thread);
-      else if (thread_list
-	       && current_thread == -1
-	       && ptid_equal (current_ptid, null_ptid))
-	ui_out_message (uiout, 0, "\n\
+	  gdb_assert (num != 0);
+	  uiout->field_int ("current-thread-id", num);
+	}
+
+      if (inferior_ptid != null_ptid && is_exited (inferior_ptid))
+	uiout->message ("\n\
+The current thread <Thread ID %s> has terminated.  See `help thread'.\n",
+			print_thread_id (inferior_thread ()));
+      else if (thread_list != NULL && inferior_ptid == null_ptid)
+	uiout->message ("\n\
 No selected thread.  See `help thread'.\n");
     }
 }
 
-/* Print information about currently known threads 
+/* See gdbthread.h.  */
 
-   Optional ARG is a thread id, or list of thread ids.
+void
+print_thread_info (struct ui_out *uiout, char *requested_threads, int pid)
+{
+  print_thread_info_1 (uiout, requested_threads, 1, pid, 0);
+}
+
+/* Implementation of the "info threads" command.
 
    Note: this has the drawback that it _really_ switches
-         threads, which frees the frame cache.  A no-side
-         effects info-threads command would be nicer.  */
+	 threads, which frees the frame cache.  A no-side
+	 effects info-threads command would be nicer.  */
 
 static void
-info_threads_command (char *arg, int from_tty)
+info_threads_command (const char *arg, int from_tty)
 {
-  print_thread_info (current_uiout, arg, -1);
+  int show_global_ids = 0;
+
+  if (arg != NULL
+      && check_for_argument (&arg, "-gid", sizeof ("-gid") - 1))
+    {
+      arg = skip_spaces (arg);
+      show_global_ids = 1;
+    }
+
+  print_thread_info_1 (current_uiout, arg, 0, -1, show_global_ids);
+}
+
+/* See gdbthread.h.  */
+
+void
+switch_to_thread_no_regs (struct thread_info *thread)
+{
+  struct inferior *inf = thread->inf;
+
+  set_current_program_space (inf->pspace);
+  set_current_inferior (inf);
+
+  inferior_ptid = thread->ptid;
+  stop_pc = ~(CORE_ADDR) 0;
+}
+
+/* Switch to no thread selected.  */
+
+static void
+switch_to_no_thread ()
+{
+  if (inferior_ptid == null_ptid)
+    return;
+
+  inferior_ptid = null_ptid;
+  reinit_frame_cache ();
+  stop_pc = ~(CORE_ADDR) 0;
 }
 
 /* Switch from one thread to another.  */
 
-void
-switch_to_thread (ptid_t ptid)
+static void
+switch_to_thread (thread_info *thr)
 {
-  /* Switch the program space as well, if we can infer it from the now
-     current thread.  Otherwise, it's up to the caller to select the
-     space it wants.  */
-  if (!ptid_equal (ptid, null_ptid))
-    {
-      struct inferior *inf;
+  gdb_assert (thr != NULL);
 
-      inf = find_inferior_ptid (ptid);
-      gdb_assert (inf != NULL);
-      set_current_program_space (inf->pspace);
-      set_current_inferior (inf);
-    }
-
-  if (ptid_equal (ptid, inferior_ptid))
+  if (inferior_ptid == thr->ptid)
     return;
 
-  inferior_ptid = ptid;
+  switch_to_thread_no_regs (thr);
+
   reinit_frame_cache ();
 
   /* We don't check for is_stopped, because we're called at times
      while in the TARGET_RUNNING state, e.g., while handling an
      internal event.  */
-  if (!ptid_equal (inferior_ptid, null_ptid)
-      && !is_exited (ptid)
-      && !is_executing (ptid))
-    stop_pc = regcache_read_pc (get_thread_regcache (ptid));
-  else
-    stop_pc = ~(CORE_ADDR) 0;
+  if (thr->state != THREAD_EXITED
+      && !thr->executing)
+    stop_pc = regcache_read_pc (get_thread_regcache (thr->ptid));
 }
 
-static void
-restore_current_thread (ptid_t ptid)
+/* See gdbthread.h.  */
+
+void
+switch_to_thread (ptid_t ptid)
 {
-  switch_to_thread (ptid);
+  if (ptid == null_ptid)
+    switch_to_no_thread ();
+  else
+    switch_to_thread (find_thread_ptid (ptid));
 }
 
 static void
@@ -1400,7 +1497,7 @@ restore_selected_frame (struct frame_id a_frame_id, int frame_level)
   select_frame (get_current_frame ());
 
   /* Warn the user.  */
-  if (frame_level > 0 && !ui_out_is_mi_like_p (current_uiout))
+  if (frame_level > 0 && !current_uiout->is_mi_like_p ())
     {
       warning (_("Couldn't restore frame #%d in "
 		 "current thread.  Bottom (innermost) frame selected:"),
@@ -1412,129 +1509,53 @@ restore_selected_frame (struct frame_id a_frame_id, int frame_level)
     }
 }
 
-/* Data used by the cleanup installed by
-   'make_cleanup_restore_current_thread'.  */
-
-struct current_thread_cleanup
+scoped_restore_current_thread::~scoped_restore_current_thread ()
 {
-  /* Next in list of currently installed 'struct
-     current_thread_cleanup' cleanups.  See
-     'current_thread_cleanup_chain' below.  */
-  struct current_thread_cleanup *next;
-
-  ptid_t inferior_ptid;
-  struct frame_id selected_frame_id;
-  int selected_frame_level;
-  int was_stopped;
-  int inf_id;
-  int was_removable;
-};
-
-/* A chain of currently installed 'struct current_thread_cleanup'
-   cleanups.  Restoring the previously selected thread looks up the
-   old thread in the thread list by ptid.  If the thread changes ptid,
-   we need to update the cleanup's thread structure so the look up
-   succeeds.  */
-static struct current_thread_cleanup *current_thread_cleanup_chain;
-
-/* A thread_ptid_changed observer.  Update all currently installed
-   current_thread_cleanup cleanups that want to switch back to
-   OLD_PTID to switch back to NEW_PTID instead.  */
-
-static void
-restore_current_thread_ptid_changed (ptid_t old_ptid, ptid_t new_ptid)
-{
-  struct current_thread_cleanup *it;
-
-  for (it = current_thread_cleanup_chain; it != NULL; it = it->next)
-    {
-      if (ptid_equal (it->inferior_ptid, old_ptid))
-	it->inferior_ptid = new_ptid;
-    }
-}
-
-static void
-do_restore_current_thread_cleanup (void *arg)
-{
-  struct thread_info *tp;
-  struct current_thread_cleanup *old = (struct current_thread_cleanup *) arg;
-
-  tp = find_thread_ptid (old->inferior_ptid);
-
-  /* If the previously selected thread belonged to a process that has
-     in the mean time been deleted (due to normal exit, detach, etc.),
-     then don't revert back to it, but instead simply drop back to no
-     thread selected.  */
-  if (tp
-      && find_inferior_ptid (tp->ptid) != NULL)
-    restore_current_thread (old->inferior_ptid);
+  /* If an entry of thread_info was previously selected, it won't be
+     deleted because we've increased its refcount.  The thread represented
+     by this thread_info entry may have already exited (due to normal exit,
+     detach, etc), so the thread_info.state is THREAD_EXITED.  */
+  if (m_thread != NULL
+      /* If the previously selected thread belonged to a process that has
+	 in the mean time exited (or killed, detached, etc.), then don't revert
+	 back to it, but instead simply drop back to no thread selected.  */
+      && m_inf->pid != 0)
+    switch_to_thread (m_thread);
   else
     {
-      restore_current_thread (null_ptid);
-      set_current_inferior (find_inferior_id (old->inf_id));
+      switch_to_no_thread ();
+      set_current_inferior (m_inf);
     }
 
   /* The running state of the originally selected thread may have
      changed, so we have to recheck it here.  */
-  if (!ptid_equal (inferior_ptid, null_ptid)
-      && old->was_stopped
+  if (inferior_ptid != null_ptid
+      && m_was_stopped
       && is_stopped (inferior_ptid)
       && target_has_registers
       && target_has_stack
       && target_has_memory)
-    restore_selected_frame (old->selected_frame_id,
-			    old->selected_frame_level);
+    restore_selected_frame (m_selected_frame_id, m_selected_frame_level);
+
+  if (m_thread != NULL)
+    m_thread->decref ();
+  m_inf->decref ();
 }
 
-static void
-restore_current_thread_cleanup_dtor (void *arg)
+scoped_restore_current_thread::scoped_restore_current_thread ()
 {
-  struct current_thread_cleanup *old = (struct current_thread_cleanup *) arg;
-  struct thread_info *tp;
-  struct inferior *inf;
+  m_thread = NULL;
+  m_inf = current_inferior ();
 
-  current_thread_cleanup_chain = current_thread_cleanup_chain->next;
-
-  tp = find_thread_ptid (old->inferior_ptid);
-  if (tp)
-    tp->refcount--;
-  inf = find_inferior_id (old->inf_id);
-  if (inf != NULL)
-    inf->removable = old->was_removable;
-  xfree (old);
-}
-
-/* Set the thread reference count.  */
-
-static void
-set_thread_refcount (void *data)
-{
-  int k;
-  struct thread_array_cleanup *ta_cleanup
-    = (struct thread_array_cleanup *) data;
-
-  for (k = 0; k != ta_cleanup->count; k++)
-    ta_cleanup->tp_array[k]->refcount--;
-}
-
-struct cleanup *
-make_cleanup_restore_current_thread (void)
-{
-  struct thread_info *tp;
-  struct frame_info *frame;
-  struct current_thread_cleanup *old = XNEW (struct current_thread_cleanup);
-
-  old->inferior_ptid = inferior_ptid;
-  old->inf_id = current_inferior ()->num;
-  old->was_removable = current_inferior ()->removable;
-
-  old->next = current_thread_cleanup_chain;
-  current_thread_cleanup_chain = old;
-
-  if (!ptid_equal (inferior_ptid, null_ptid))
+  if (inferior_ptid != null_ptid)
     {
-      old->was_stopped = is_stopped (inferior_ptid);
-      if (old->was_stopped
+      thread_info *tp = find_thread_ptid (inferior_ptid);
+      struct frame_info *frame;
+
+      gdb_assert (tp != NULL);
+
+      m_was_stopped = tp->state == THREAD_STOPPED;
+      if (m_was_stopped
 	  && target_has_registers
 	  && target_has_stack
 	  && target_has_memory)
@@ -1549,38 +1570,70 @@ make_cleanup_restore_current_thread (void)
       else
 	frame = NULL;
 
-      old->selected_frame_id = get_frame_id (frame);
-      old->selected_frame_level = frame_relative_level (frame);
+      m_selected_frame_id = get_frame_id (frame);
+      m_selected_frame_level = frame_relative_level (frame);
 
-      tp = find_thread_ptid (inferior_ptid);
-      if (tp)
-	tp->refcount++;
+      tp->incref ();
+      m_thread = tp;
     }
 
-  current_inferior ()->removable = 0;
-
-  return make_cleanup_dtor (do_restore_current_thread_cleanup, old,
-			    restore_current_thread_cleanup_dtor);
+  m_inf->incref ();
 }
 
-/* If non-zero tp_array_compar should sort in ascending order, otherwise in
-   descending order.  */
+/* See gdbthread.h.  */
 
-static int tp_array_compar_ascending;
-
-/* Sort an array for struct thread_info pointers by their NUM, order is
-   determined by TP_ARRAY_COMPAR_ASCENDING.  */
-
-static int
-tp_array_compar (const void *ap_voidp, const void *bp_voidp)
+int
+show_thread_that_caused_stop (void)
 {
-  const struct thread_info *const *ap
-    = (const struct thread_info * const*) ap_voidp;
-  const struct thread_info *const *bp
-    = (const struct thread_info * const*) bp_voidp;
+  return highest_thread_num > 1;
+}
 
-  return ((((*ap)->num > (*bp)->num) - ((*ap)->num < (*bp)->num))
-	  * (tp_array_compar_ascending ? +1 : -1));
+/* See gdbthread.h.  */
+
+int
+show_inferior_qualified_tids (void)
+{
+  return (inferior_list->next != NULL || inferior_list->num != 1);
+}
+
+/* See gdbthread.h.  */
+
+const char *
+print_thread_id (struct thread_info *thr)
+{
+  char *s = get_print_cell ();
+
+  if (show_inferior_qualified_tids ())
+    xsnprintf (s, PRINT_CELL_SIZE, "%d.%d", thr->inf->num, thr->per_inf_num);
+  else
+    xsnprintf (s, PRINT_CELL_SIZE, "%d", thr->per_inf_num);
+  return s;
+}
+
+/* If true, tp_array_compar should sort in ascending order, otherwise
+   in descending order.  */
+
+static bool tp_array_compar_ascending;
+
+/* Sort an array for struct thread_info pointers by thread ID (first
+   by inferior number, and then by per-inferior thread number).  The
+   order is determined by TP_ARRAY_COMPAR_ASCENDING.  */
+
+static bool
+tp_array_compar (const thread_info *a, const thread_info *b)
+{
+  if (a->inf->num != b->inf->num)
+    {
+      if (tp_array_compar_ascending)
+	return a->inf->num < b->inf->num;
+      else
+	return a->inf->num > b->inf->num;
+    }
+
+  if (tp_array_compar_ascending)
+    return (a->per_inf_num < b->per_inf_num);
+  else
+    return (a->per_inf_num > b->per_inf_num);
 }
 
 /* Apply a GDB command to a list of threads.  List syntax is a whitespace
@@ -1592,19 +1645,14 @@ tp_array_compar (const void *ap_voidp, const void *bp_voidp)
    thread apply all p x/i $pc   Apply x/i $pc cmd to all threads.  */
 
 static void
-thread_apply_all_command (char *cmd, int from_tty)
+thread_apply_all_command (const char *cmd, int from_tty)
 {
-  struct cleanup *old_chain;
-  char *saved_cmd;
-  int tc;
-  struct thread_array_cleanup ta_cleanup;
-
-  tp_array_compar_ascending = 0;
+  tp_array_compar_ascending = false;
   if (cmd != NULL
       && check_for_argument (&cmd, "-ascending", strlen ("-ascending")))
     {
       cmd = skip_spaces (cmd);
-      tp_array_compar_ascending = 1;
+      tp_array_compar_ascending = true;
     }
 
   if (cmd == NULL || *cmd == '\000')
@@ -1612,151 +1660,191 @@ thread_apply_all_command (char *cmd, int from_tty)
 
   update_thread_list ();
 
-  old_chain = make_cleanup_restore_current_thread ();
-
-  /* Save a copy of the command in case it is clobbered by
-     execute_command.  */
-  saved_cmd = xstrdup (cmd);
-  make_cleanup (xfree, saved_cmd);
-
-  /* Note this includes exited threads.  */
-  tc = thread_count ();
+  int tc = live_threads_count ();
   if (tc != 0)
     {
-      struct thread_info **tp_array;
-      struct thread_info *tp;
-      int i = 0, k;
+      /* Save a copy of the thread list and increment each thread's
+	 refcount while executing the command in the context of each
+	 thread, in case the command is one that wipes threads.  E.g.,
+	 detach, kill, disconnect, etc., or even normally continuing
+	 over an inferior or thread exit.  */
+      std::vector<thread_info *> thr_list_cpy;
+      thr_list_cpy.reserve (tc);
 
-      /* Save a copy of the thread_list in case we execute detach
-         command.  */
-      tp_array = XNEWVEC (struct thread_info *, tc);
-      make_cleanup (xfree, tp_array);
+      {
+	thread_info *tp;
 
-      ALL_NON_EXITED_THREADS (tp)
-        {
-          tp_array[i] = tp;
-          tp->refcount++;
-          i++;
-        }
-      /* Because we skipped exited threads, we may end up with fewer
-	 threads in the array than the total count of threads.  */
-      gdb_assert (i <= tc);
+	ALL_NON_EXITED_THREADS (tp)
+	  {
+	    thr_list_cpy.push_back (tp);
+	  }
 
-      if (i != 0)
-	qsort (tp_array, i, sizeof (*tp_array), tp_array_compar);
+	gdb_assert (thr_list_cpy.size () == tc);
+      }
 
-      ta_cleanup.tp_array = tp_array;
-      ta_cleanup.count = i;
-      make_cleanup (set_thread_refcount, &ta_cleanup);
+      /* Increment the refcounts, and restore them back on scope
+	 exit.  */
+      scoped_inc_dec_ref inc_dec_ref (thr_list_cpy);
 
-      for (k = 0; k != i; k++)
-        if (thread_alive (tp_array[k]))
-          {
-            switch_to_thread (tp_array[k]->ptid);
-            printf_filtered (_("\nThread %d (%s):\n"), 
-			     tp_array[k]->num,
+      std::sort (thr_list_cpy.begin (), thr_list_cpy.end (), tp_array_compar);
+
+      scoped_restore_current_thread restore_thread;
+
+      for (thread_info *thr : thr_list_cpy)
+	if (thread_alive (thr))
+	  {
+	    switch_to_thread (thr->ptid);
+	    printf_filtered (_("\nThread %s (%s):\n"),
+			     print_thread_id (thr),
 			     target_pid_to_str (inferior_ptid));
-            execute_command (cmd, from_tty);
 
-            /* Restore exact command used previously.  */
-            strcpy (cmd, saved_cmd);
+	    execute_command (cmd, from_tty);
 	  }
     }
-
-  do_cleanups (old_chain);
 }
 
+/* Implementation of the "thread apply" command.  */
+
 static void
-thread_apply_command (char *tidlist, int from_tty)
+thread_apply_command (const char *tidlist, int from_tty)
 {
-  char *cmd;
-  struct cleanup *old_chain;
-  char *saved_cmd;
-  struct get_number_or_range_state state;
+  const char *cmd = NULL;
+  tid_range_parser parser;
 
   if (tidlist == NULL || *tidlist == '\000')
     error (_("Please specify a thread ID list"));
 
-  for (cmd = tidlist; *cmd != '\000' && !isalpha (*cmd); cmd++);
-
-  if (*cmd == '\000')
-    error (_("Please specify a command following the thread ID list"));
-
-  /* Save a copy of the command in case it is clobbered by
-     execute_command.  */
-  saved_cmd = xstrdup (cmd);
-  old_chain = make_cleanup (xfree, saved_cmd);
-
-  init_number_or_range (&state, tidlist);
-  while (!state.finished && state.string < cmd)
+  parser.init (tidlist, current_inferior ()->num);
+  while (!parser.finished ())
     {
-      struct thread_info *tp;
-      int start;
+      int inf_num, thr_start, thr_end;
 
-      start = get_number_or_range (&state);
-
-      make_cleanup_restore_current_thread ();
-
-      tp = find_thread_id (start);
-
-      if (!tp)
-	warning (_("Unknown thread %d."), start);
-      else if (!thread_alive (tp))
-	warning (_("Thread %d has terminated."), start);
-      else
+      if (!parser.get_tid_range (&inf_num, &thr_start, &thr_end))
 	{
-	  switch_to_thread (tp->ptid);
-
-	  printf_filtered (_("\nThread %d (%s):\n"), tp->num,
-			   target_pid_to_str (inferior_ptid));
-	  execute_command (cmd, from_tty);
-
-	  /* Restore exact command used previously.  */
-	  strcpy (cmd, saved_cmd);
+	  cmd = parser.cur_tok ();
+	  break;
 	}
     }
 
-  do_cleanups (old_chain);
+  if (cmd == NULL)
+    error (_("Please specify a command following the thread ID list"));
+
+  if (tidlist == cmd || !isalpha (cmd[0]))
+    invalid_thread_id_error (cmd);
+
+  scoped_restore_current_thread restore_thread;
+
+  parser.init (tidlist, current_inferior ()->num);
+  while (!parser.finished () && parser.cur_tok () < cmd)
+    {
+      struct thread_info *tp = NULL;
+      struct inferior *inf;
+      int inf_num, thr_num;
+
+      parser.get_tid (&inf_num, &thr_num);
+      inf = find_inferior_id (inf_num);
+      if (inf != NULL)
+	tp = find_thread_id (inf, thr_num);
+
+      if (parser.in_star_range ())
+	{
+	  if (inf == NULL)
+	    {
+	      warning (_("Unknown inferior %d"), inf_num);
+	      parser.skip_range ();
+	      continue;
+	    }
+
+	  /* No use looking for threads past the highest thread number
+	     the inferior ever had.  */
+	  if (thr_num >= inf->highest_thread_num)
+	    parser.skip_range ();
+
+	  /* Be quiet about unknown threads numbers.  */
+	  if (tp == NULL)
+	    continue;
+	}
+
+      if (tp == NULL)
+	{
+	  if (show_inferior_qualified_tids () || parser.tid_is_qualified ())
+	    warning (_("Unknown thread %d.%d"), inf_num, thr_num);
+	  else
+	    warning (_("Unknown thread %d"), thr_num);
+	  continue;
+	}
+
+      if (!thread_alive (tp))
+	{
+	  warning (_("Thread %s has terminated."), print_thread_id (tp));
+	  continue;
+	}
+
+      switch_to_thread (tp->ptid);
+
+      printf_filtered (_("\nThread %s (%s):\n"), print_thread_id (tp),
+		       target_pid_to_str (inferior_ptid));
+      execute_command (cmd, from_tty);
+    }
 }
 
 /* Switch to the specified thread.  Will dispatch off to thread_apply_command
    if prefix of arg is `apply'.  */
 
 void
-thread_command (char *tidstr, int from_tty)
+thread_command (const char *tidstr, int from_tty)
 {
-  if (!tidstr)
+  if (tidstr == NULL)
     {
-      if (ptid_equal (inferior_ptid, null_ptid))
+      if (inferior_ptid == null_ptid)
 	error (_("No thread selected"));
 
       if (target_has_stack)
 	{
+	  struct thread_info *tp = inferior_thread ();
+
 	  if (is_exited (inferior_ptid))
-	    printf_filtered (_("[Current thread is %d (%s) (exited)]\n"),
-			     pid_to_thread_id (inferior_ptid),
+	    printf_filtered (_("[Current thread is %s (%s) (exited)]\n"),
+			     print_thread_id (tp),
 			     target_pid_to_str (inferior_ptid));
 	  else
-	    printf_filtered (_("[Current thread is %d (%s)]\n"),
-			     pid_to_thread_id (inferior_ptid),
+	    printf_filtered (_("[Current thread is %s (%s)]\n"),
+			     print_thread_id (tp),
 			     target_pid_to_str (inferior_ptid));
 	}
       else
 	error (_("No stack."));
-      return;
     }
+  else
+    {
+      ptid_t previous_ptid = inferior_ptid;
 
-  gdb_thread_select (current_uiout, tidstr, NULL);
+      thread_select (tidstr, parse_thread_id (tidstr, NULL));
+
+      /* Print if the thread has not changed, otherwise an event will
+	 be sent.  */
+      if (inferior_ptid == previous_ptid)
+	{
+	  print_selected_thread_frame (current_uiout,
+				       USER_SELECTED_THREAD
+				       | USER_SELECTED_FRAME);
+	}
+      else
+	{
+	  observer_notify_user_selected_context_changed (USER_SELECTED_THREAD
+							 | USER_SELECTED_FRAME);
+	}
+    }
 }
 
 /* Implementation of `thread name'.  */
 
 static void
-thread_name_command (char *arg, int from_tty)
+thread_name_command (const char *arg, int from_tty)
 {
   struct thread_info *info;
 
-  if (ptid_equal (inferior_ptid, null_ptid))
+  if (inferior_ptid == null_ptid)
     error (_("No thread selected"));
 
   arg = skip_spaces (arg);
@@ -1769,10 +1857,10 @@ thread_name_command (char *arg, int from_tty)
 /* Find thread ids with a name, target pid, or extra info matching ARG.  */
 
 static void
-thread_find_command (char *arg, int from_tty)
+thread_find_command (const char *arg, int from_tty)
 {
   struct thread_info *tp;
-  char *tmp;
+  const char *tmp;
   unsigned long match = 0;
 
   if (arg == NULL || *arg == '\0')
@@ -1787,32 +1875,32 @@ thread_find_command (char *arg, int from_tty)
     {
       if (tp->name != NULL && re_exec (tp->name))
 	{
-	  printf_filtered (_("Thread %d has name '%s'\n"),
-			   tp->num, tp->name);
+	  printf_filtered (_("Thread %s has name '%s'\n"),
+			   print_thread_id (tp), tp->name);
 	  match++;
 	}
 
       tmp = target_thread_name (tp);
       if (tmp != NULL && re_exec (tmp))
 	{
-	  printf_filtered (_("Thread %d has target name '%s'\n"),
-			   tp->num, tmp);
+	  printf_filtered (_("Thread %s has target name '%s'\n"),
+			   print_thread_id (tp), tmp);
 	  match++;
 	}
 
       tmp = target_pid_to_str (tp->ptid);
       if (tmp != NULL && re_exec (tmp))
 	{
-	  printf_filtered (_("Thread %d has target id '%s'\n"),
-			   tp->num, tmp);
+	  printf_filtered (_("Thread %s has target id '%s'\n"),
+			   print_thread_id (tp), tmp);
 	  match++;
 	}
 
       tmp = target_extra_thread_info (tp);
       if (tmp != NULL && re_exec (tmp))
 	{
-	  printf_filtered (_("Thread %d has extra info '%s'\n"),
-			   tp->num, tmp);
+	  printf_filtered (_("Thread %s has extra info '%s'\n"),
+			   print_thread_id (tp), tmp);
 	  match++;
 	}
     }
@@ -1824,63 +1912,69 @@ thread_find_command (char *arg, int from_tty)
 int print_thread_events = 1;
 static void
 show_print_thread_events (struct ui_file *file, int from_tty,
-                          struct cmd_list_element *c, const char *value)
+			  struct cmd_list_element *c, const char *value)
 {
   fprintf_filtered (file,
 		    _("Printing of thread events is %s.\n"),
-                    value);
+		    value);
 }
 
-static int
-do_captured_thread_select (struct ui_out *uiout, void *tidstr)
+/* See gdbthread.h.  */
+
+void
+thread_select (const char *tidstr, thread_info *tp)
 {
-  int num;
-  struct thread_info *tp;
-
-  num = value_as_long (parse_and_eval ((const char *) tidstr));
-
-  tp = find_thread_id (num);
-
-  if (!tp)
-    error (_("Thread ID %d not known."), num);
-
   if (!thread_alive (tp))
-    error (_("Thread ID %d has terminated."), num);
+    error (_("Thread ID %s has terminated."), tidstr);
 
   switch_to_thread (tp->ptid);
 
   annotate_thread_changed ();
 
-  ui_out_text (uiout, "[Switching to thread ");
-  ui_out_field_int (uiout, "new-thread-id", pid_to_thread_id (inferior_ptid));
-  ui_out_text (uiout, " (");
-  ui_out_text (uiout, target_pid_to_str (inferior_ptid));
-  ui_out_text (uiout, ")]");
-
-  /* Note that we can't reach this with an exited thread, due to the
-     thread_alive check above.  */
-  if (tp->state == THREAD_RUNNING)
-    ui_out_text (uiout, "(running)\n");
-  else
-    {
-      ui_out_text (uiout, "\n");
-      print_stack_frame (get_selected_frame (NULL), 1, SRC_AND_LOC, 1);
-    }
-
   /* Since the current thread may have changed, see if there is any
      exited thread we can now delete.  */
   prune_threads ();
-
-  return GDB_RC_OK;
 }
 
-enum gdb_rc
-gdb_thread_select (struct ui_out *uiout, char *tidstr, char **error_message)
+/* Print thread and frame switch command response.  */
+
+void
+print_selected_thread_frame (struct ui_out *uiout,
+			     user_selected_what selection)
 {
-  if (catch_exceptions_with_msg (uiout, do_captured_thread_select, tidstr,
-				 error_message, RETURN_MASK_ALL) < 0)
-    return GDB_RC_FAIL;
-  return GDB_RC_OK;
+  struct thread_info *tp = inferior_thread ();
+
+  if (selection & USER_SELECTED_THREAD)
+    {
+      if (uiout->is_mi_like_p ())
+	{
+	  uiout->field_int ("new-thread-id",
+			    inferior_thread ()->global_num);
+	}
+      else
+	{
+	  uiout->text ("[Switching to thread ");
+	  uiout->field_string ("new-thread-id", print_thread_id (tp));
+	  uiout->text (" (");
+	  uiout->text (target_pid_to_str (inferior_ptid));
+	  uiout->text (")]");
+	}
+    }
+
+  if (tp->state == THREAD_RUNNING)
+    {
+      if (selection & USER_SELECTED_THREAD)
+	uiout->text ("(running)\n");
+    }
+  else if (selection & USER_SELECTED_FRAME)
+    {
+      if (selection & USER_SELECTED_THREAD)
+	uiout->text ("\n");
+
+      if (has_stack_frames ())
+	print_stack_frame_to_uiout (uiout, get_selected_frame (NULL),
+				    1, SRC_AND_LOC, 1);
+    }
 }
 
 /* Update the 'threads_executing' global based on the threads we know
@@ -1909,17 +2003,46 @@ update_thread_list (void)
   update_threads_executing ();
 }
 
-/* Return a new value for the selected thread's id.  Return a value of 0 if
-   no thread is selected, or no threads exist.  */
+/* Return a new value for the selected thread's id.  Return a value of
+   0 if no thread is selected.  If GLOBAL is true, return the thread's
+   global number.  Otherwise return the per-inferior number.  */
 
 static struct value *
-thread_id_make_value (struct gdbarch *gdbarch, struct internalvar *var,
-		      void *ignore)
+thread_num_make_value_helper (struct gdbarch *gdbarch, int global)
 {
   struct thread_info *tp = find_thread_ptid (inferior_ptid);
+  int int_val;
 
-  return value_from_longest (builtin_type (gdbarch)->builtin_int,
-			     (tp ? tp->num : 0));
+  if (tp == NULL)
+    int_val = 0;
+  else if (global)
+    int_val = tp->global_num;
+  else
+    int_val = tp->per_inf_num;
+
+  return value_from_longest (builtin_type (gdbarch)->builtin_int, int_val);
+}
+
+/* Return a new value for the selected thread's per-inferior thread
+   number.  Return a value of 0 if no thread is selected, or no
+   threads exist.  */
+
+static struct value *
+thread_id_per_inf_num_make_value (struct gdbarch *gdbarch,
+				  struct internalvar *var,
+				  void *ignore)
+{
+  return thread_num_make_value_helper (gdbarch, 0);
+}
+
+/* Return a new value for the selected thread's global id.  Return a
+   value of 0 if no thread is selected, or no threads exist.  */
+
+static struct value *
+global_thread_id_make_value (struct gdbarch *gdbarch, struct internalvar *var,
+			     void *ignore)
+{
+  return thread_num_make_value_helper (gdbarch, 1);
 }
 
 /* Commands with a prefix of `thread'.  */
@@ -1929,7 +2052,16 @@ struct cmd_list_element *thread_cmd_list = NULL;
 
 static const struct internalvar_funcs thread_funcs =
 {
-  thread_id_make_value,
+  thread_id_per_inf_num_make_value,
+  NULL,
+  NULL
+};
+
+/* Implementation of `gthread' variable.  */
+
+static const struct internalvar_funcs gthread_funcs =
+{
+  global_thread_id_make_value,
   NULL,
   NULL
 };
@@ -1939,11 +2071,12 @@ _initialize_thread (void)
 {
   static struct cmd_list_element *thread_apply_list = NULL;
 
-  add_info ("threads", info_threads_command, 
+  add_info ("threads", info_threads_command,
 	    _("Display currently known threads.\n\
-Usage: info threads [ID]...\n\
-Optional arguments are thread IDs with spaces between.\n\
-If no arguments, all threads are displayed."));
+Usage: info threads [-gid] [ID]...\n\
+-gid: Show global thread IDs.\n\
+If ID is given, it is a space-separated list of IDs of threads to display.\n\
+Otherwise, all threads are displayed."));
 
   add_prefix_cmd ("thread", class_run, thread_command, _("\
 Use this command to switch between threads.\n\
@@ -1978,14 +2111,13 @@ Will display thread ids whose name, target ID, or extra info matches REGEXP."),
   add_com_alias ("t", "thread", class_run, 1);
 
   add_setshow_boolean_cmd ("thread-events", no_class,
-         &print_thread_events, _("\
+			   &print_thread_events, _("\
 Set printing of thread events (such as thread start and exit)."), _("\
 Show printing of thread events (such as thread start and exit)."), NULL,
-         NULL,
-         show_print_thread_events,
-         &setprintlist, &showprintlist);
+			   NULL,
+			   show_print_thread_events,
+			   &setprintlist, &showprintlist);
 
   create_internalvar_type_lazy ("_thread", &thread_funcs, NULL);
-
-  observer_attach_thread_ptid_changed (restore_current_thread_ptid_changed);
+  create_internalvar_type_lazy ("_gthread", &gthread_funcs, NULL);
 }

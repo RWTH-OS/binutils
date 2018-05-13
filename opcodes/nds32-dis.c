@@ -1,5 +1,5 @@
 /* NDS32-specific support for 32-bit ELF.
-   Copyright (C) 2012-2015 Free Software Foundation, Inc.
+   Copyright (C) 2012-2018 Free Software Foundation, Inc.
    Contributed by Andes Technology Corporation.
 
    This file is part of BFD, the Binary File Descriptor library.
@@ -22,7 +22,7 @@
 #include "sysdep.h"
 #include <stdio.h>
 #include "ansidecl.h"
-#include "dis-asm.h"
+#include "disassemble.h"
 #include "bfd.h"
 #include "symcat.h"
 #include "libiberty.h"
@@ -155,7 +155,7 @@ nds32_parse_audio_ext (const field_t *pfd,
       else
 	int_value = __GF (insn, pfd->bitpos, pfd->bitsize) << pfd->shift;
 
-      if (int_value < 0)
+      if (int_value < 10)
 	func (stream, "#%d", int_value);
       else
 	func (stream, "#0x%x", int_value);
@@ -269,7 +269,7 @@ nds32_parse_opcode (struct nds32_opcode *opc, bfd_vma pc ATTRIBUTE_UNUSED,
       else if (strstr (opc->instruction, "tito"))
 	func (stream, "%s", opc->opcode);
       else
-	func (stream, "%s ", opc->opcode);
+	func (stream, "%s\t", opc->opcode);
     }
 
   while (*pstr_src)
@@ -280,7 +280,7 @@ nds32_parse_opcode (struct nds32_opcode *opc, bfd_vma pc ATTRIBUTE_UNUSED,
 	case '=':
 	case '&':
 	  pstr_src++;
-	  /* compare with operand_fields[].name.  */
+	  /* Compare with operand_fields[].name.  */
 	  pstr_tmp = &tmp_string[0];
 	  while (*pstr_src)
 	    {
@@ -304,7 +304,7 @@ nds32_parse_opcode (struct nds32_opcode *opc, bfd_vma pc ATTRIBUTE_UNUSED,
 	      pfd++;
 	    }
 
-	  /* for insn-16.  */
+	  /* For insn-16.  */
 	  if (parse_mode & NDS32_PARSE_INSN16)
 	    {
 	      if (pfd->hw_res == HW_GPR)
@@ -373,13 +373,18 @@ nds32_parse_opcode (struct nds32_opcode *opc, bfd_vma pc ATTRIBUTE_UNUSED,
 		    }
 		  else if (pfd->hw_res == HW_INT)
 		    {
-		      if (int_value < 0)
+		      if (int_value < 10)
 			func (stream, "#%d", int_value);
 		      else
 			func (stream, "#0x%x", int_value);
 		    }
-		  else		/* if(pfd->hw_res == HW_UINT).  */
-		    func (stream, "#0x%x", int_value);
+		  else /* if (pfd->hw_res == HW_UINT).  */
+		    {
+		      if (int_value < 10)
+			func (stream, "#%u", int_value);
+		      else
+			func (stream, "#0x%x", int_value);
+		    }
 		}
 
 	    }
@@ -491,14 +496,17 @@ nds32_parse_opcode (struct nds32_opcode *opc, bfd_vma pc ATTRIBUTE_UNUSED,
 		}
 	      else if (pfd->hw_res == HW_INT)
 		{
-		  if (int_value < 0)
+		  if (int_value < 10)
 		    func (stream, "#%d", int_value);
 		  else
 		    func (stream, "#0x%x", int_value);
 		}
-	      else		/* if(pfd->hw_res == HW_UINT).  */
+	      else /* if (pfd->hw_res == HW_UINT).  */
 		{
-		  func (stream, "#0x%x", int_value);
+		  if (int_value < 10)
+		    func (stream, "#%u", int_value);
+		  else
+		    func (stream, "#0x%x", int_value);
 		}
 	    }
 	  break;
@@ -508,13 +516,34 @@ nds32_parse_opcode (struct nds32_opcode *opc, bfd_vma pc ATTRIBUTE_UNUSED,
 	  pstr_src++;
 	  break;
 
+	case ',':
+	  func (stream, ", ");
+	  pstr_src++;
+	  break;
+	  
+	case '+':
+	  func (stream, " + ");
+	  pstr_src++;
+	  break;
+	  
+	case '<':
+	  if (pstr_src[1] == '<')
+	    {
+	      func (stream, " << ");
+	      pstr_src += 2;
+	    }
+	  else
+	    {
+	      func (stream, " <");
+	      pstr_src++;
+	    }
+	  break;
+	  
 	default:
 	  func (stream, "%c", *pstr_src++);
 	  break;
-	}			/* switch (*pstr_src).  */
-
-    }				/* while (*pstr_src).  */
-  return;
+	}
+    }
 }
 
 /* Filter instructions with some bits must be fixed.  */
@@ -730,10 +759,10 @@ nds32_mask_opcode (uint32_t insn)
       return MASK_OP (insn, 0);
     case N32_OP6_ALU2:
       /* FFBI */
-      if (__GF (insn, 0, 7) == (N32_ALU2_FFBI | __BIT (6)))
+      if (__GF (insn, 0, 7) == (N32_ALU2_FFBI | N32_BIT (6)))
 	return MASK_OP (insn, 0x7f);
-      else if (__GF (insn, 0, 7) == (N32_ALU2_MFUSR | __BIT (6))
-	       || __GF (insn, 0, 7) == (N32_ALU2_MTUSR | __BIT (6)))
+      else if (__GF (insn, 0, 7) == (N32_ALU2_MFUSR | N32_BIT (6))
+	       || __GF (insn, 0, 7) == (N32_ALU2_MTUSR | N32_BIT (6)))
 	/* RDOV CLROV */
 	return MASK_OP (insn, 0xf81ff);
       return MASK_OP (insn, 0x1ff);

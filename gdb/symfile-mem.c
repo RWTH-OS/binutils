@@ -1,6 +1,6 @@
 /* Reading symbol files from memory.
 
-   Copyright (C) 1986-2015 Free Software Foundation, Inc.
+   Copyright (C) 1986-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -91,6 +91,7 @@ symbol_file_add_from_memory (struct bfd *templ, CORE_ADDR addr,
   struct section_addr_info *sai;
   unsigned int i;
   struct cleanup *cleanup;
+  symfile_add_flags add_flags = 0;
 
   if (bfd_get_flavour (templ) != bfd_target_elf_flavour)
     error (_("add-symbol-file-from-memory not supported for this target"));
@@ -100,21 +101,21 @@ symbol_file_add_from_memory (struct bfd *templ, CORE_ADDR addr,
   if (nbfd == NULL)
     error (_("Failed to read a valid object file image from memory."));
 
-  gdb_bfd_ref (nbfd);
+  /* Manage the new reference for the duration of this function.  */
+  gdb_bfd_ref_ptr nbfd_holder = new_bfd_ref (nbfd);
+
   xfree (bfd_get_filename (nbfd));
   if (name == NULL)
     nbfd->filename = xstrdup ("shared object read from target memory");
   else
     nbfd->filename = name;
 
-  cleanup = make_cleanup_bfd_unref (nbfd);
-
   if (!bfd_check_format (nbfd, bfd_object))
     error (_("Got object file from memory but can't read symbols: %s."),
 	   bfd_errmsg (bfd_get_error ()));
 
   sai = alloc_section_addr_info (bfd_count_sections (nbfd));
-  make_cleanup (xfree, sai);
+  cleanup = make_cleanup (xfree, sai);
   i = 0;
   for (sec = nbfd->sections; sec != NULL; sec = sec->next)
     if ((bfd_get_section_flags (nbfd, sec) & (SEC_ALLOC|SEC_LOAD)) != 0)
@@ -126,9 +127,11 @@ symbol_file_add_from_memory (struct bfd *templ, CORE_ADDR addr,
       }
   sai->num_sections = i;
 
+  if (from_tty)
+    add_flags |= SYMFILE_VERBOSE;
+
   objf = symbol_file_add_from_bfd (nbfd, bfd_get_filename (nbfd),
-				   from_tty ? SYMFILE_VERBOSE : 0,
-                                   sai, OBJF_SHARED, NULL);
+				   add_flags, sai, OBJF_SHARED, NULL);
 
   add_target_sections_of_objfile (objf);
 
@@ -141,7 +144,7 @@ symbol_file_add_from_memory (struct bfd *templ, CORE_ADDR addr,
 
 
 static void
-add_symbol_file_from_memory_command (char *args, int from_tty)
+add_symbol_file_from_memory_command (const char *args, int from_tty)
 {
   CORE_ADDR addr;
   struct bfd *templ;
@@ -163,31 +166,6 @@ add_symbol_file_from_memory_command (char *args, int from_tty)
   symbol_file_add_from_memory (templ, addr, 0, NULL, from_tty);
 }
 
-/* Arguments for symbol_file_add_from_memory_wrapper.  */
-
-struct symbol_file_add_from_memory_args
-{
-  struct bfd *bfd;
-  CORE_ADDR sysinfo_ehdr;
-  size_t size;
-  char *name;
-  int from_tty;
-};
-
-/* Wrapper function for symbol_file_add_from_memory, for
-   catch_exceptions.  */
-
-static int
-symbol_file_add_from_memory_wrapper (struct ui_out *uiout, void *data)
-{
-  struct symbol_file_add_from_memory_args *args
-    = (struct symbol_file_add_from_memory_args *) data;
-
-  symbol_file_add_from_memory (args->bfd, args->sysinfo_ehdr, args->size,
-			       args->name, args->from_tty);
-  return 0;
-}
-
 /* Try to add the symbols for the vsyscall page, if there is one.
    This function is called via the inferior_created observer.  */
 
@@ -199,7 +177,6 @@ add_vsyscall_page (struct target_ops *target, int from_tty)
   if (gdbarch_vsyscall_range (target_gdbarch (), &vsyscall_range))
     {
       struct bfd *bfd;
-      struct symbol_file_add_from_memory_args args;
 
       if (core_bfd != NULL)
 	bfd = core_bfd;
@@ -214,29 +191,30 @@ add_vsyscall_page (struct target_ops *target, int from_tty)
 	  format should fix this.  */
 	{
 	  warning (_("Could not load vsyscall page "
-		     "because no executable was specified\n"
-		     "try using the \"file\" command first."));
+		     "because no executable was specified"));
 	  return;
 	}
-      args.bfd = bfd;
-      args.sysinfo_ehdr = vsyscall_range.start;
-      args.size = vsyscall_range.length;
 
-      args.name = xstrprintf ("system-supplied DSO at %s",
-			      paddress (target_gdbarch (), vsyscall_range.start));
-      /* Pass zero for FROM_TTY, because the action of loading the
-	 vsyscall DSO was not triggered by the user, even if the user
-	 typed "run" at the TTY.  */
-      args.from_tty = 0;
-      catch_exceptions (current_uiout, symbol_file_add_from_memory_wrapper,
-			&args, RETURN_MASK_ALL);
+      char *name = xstrprintf ("system-supplied DSO at %s",
+			       paddress (target_gdbarch (), vsyscall_range.start));
+      TRY
+	{
+	  /* Pass zero for FROM_TTY, because the action of loading the
+	     vsyscall DSO was not triggered by the user, even if the
+	     user typed "run" at the TTY.  */
+	  symbol_file_add_from_memory (bfd,
+				       vsyscall_range.start,
+				       vsyscall_range.length,
+				       name,
+				       0 /* from_tty */);
+	}
+      CATCH (ex, RETURN_MASK_ALL)
+	{
+	  exception_print (gdb_stderr, ex);
+	}
+      END_CATCH
     }
 }
-
-
-
-/* Provide a prototype to silence -Wmissing-prototypes.  */
-extern initialize_file_ftype _initialize_symfile_mem;
 
 void
 _initialize_symfile_mem (void)

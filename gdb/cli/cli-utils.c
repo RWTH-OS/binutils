@@ -1,6 +1,6 @@
 /* CLI utilities.
 
-   Copyright (C) 2011-2015 Free Software Foundation, Inc.
+   Copyright (C) 2011-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -23,20 +23,20 @@
 
 #include <ctype.h>
 
-/* *PP is a string denoting a number.  Get the number of the.  Advance
-   *PP after the string and any trailing whitespace.
+/* See documentation in cli-utils.h.  */
 
-   Currently the string can either be a number, or "$" followed by the
-   name of a convenience variable, or ("$" or "$$") followed by digits.
-
-   TRAILER is a character which can be found after the number; most
-   commonly this is `-'.  If you don't want a trailer, use \0.  */
-
-static int
+int
 get_number_trailer (const char **pp, int trailer)
 {
   int retval = 0;	/* default */
   const char *p = *pp;
+  bool negative = false;
+
+  if (*p == '-')
+    {
+      ++p;
+      negative = true;
+    }
 
   if (*p == '$')
     {
@@ -77,11 +77,10 @@ get_number_trailer (const char **pp, int trailer)
     }
   else
     {
-      if (*p == '-')
-	++p;
+      const char *p1 = p;
       while (*p >= '0' && *p <= '9')
 	++p;
-      if (p == *pp)
+      if (p == p1)
 	/* There is no number here.  (e.g. "cond a == b").  */
 	{
 	  /* Skip non-numeric token.  */
@@ -91,7 +90,7 @@ get_number_trailer (const char **pp, int trailer)
 	  retval = 0;
 	}
       else
-	retval = atoi (*pp);
+	retval = atoi (p1);
     }
   if (!(isspace (*p) || *p == '\0' || *p == trailer))
     {
@@ -100,15 +99,15 @@ get_number_trailer (const char **pp, int trailer)
 	++p;
       retval = 0;
     }
-  p = skip_spaces_const (p);
+  p = skip_spaces (p);
   *pp = p;
-  return retval;
+  return negative ? -retval : retval;
 }
 
 /* See documentation in cli-utils.h.  */
 
 int
-get_number_const (const char **pp)
+get_number (const char **pp)
 {
   return get_number_trailer (pp, '\0');
 }
@@ -128,25 +127,49 @@ get_number (char **pp)
 
 /* See documentation in cli-utils.h.  */
 
-void
-init_number_or_range (struct get_number_or_range_state *state,
-		      const char *string)
+number_or_range_parser::number_or_range_parser (const char *string)
 {
-  memset (state, 0, sizeof (*state));
-  state->string = string;
+  init (string);
+}
+
+/* See documentation in cli-utils.h.  */
+
+void
+number_or_range_parser::init (const char *string)
+{
+  m_finished = false;
+  m_cur_tok = string;
+  m_last_retval = 0;
+  m_end_value = 0;
+  m_end_ptr = NULL;
+  m_in_range = false;
 }
 
 /* See documentation in cli-utils.h.  */
 
 int
-get_number_or_range (struct get_number_or_range_state *state)
+number_or_range_parser::get_number ()
 {
-  if (*state->string != '-')
+  if (m_in_range)
     {
-      /* Default case: state->string is pointing either to a solo
+      /* All number-parsing has already been done.  Return the next
+	 integer value (one greater than the saved previous value).
+	 Do not advance the token pointer until the end of range is
+	 reached.  */
+
+      if (++m_last_retval == m_end_value)
+	{
+	  /* End of range reached; advance token pointer.  */
+	  m_cur_tok = m_end_ptr;
+	  m_in_range = false;
+	}
+    }
+  else if (*m_cur_tok != '-')
+    {
+      /* Default case: state->m_cur_tok is pointing either to a solo
 	 number, or to the first number of a range.  */
-      state->last_retval = get_number_trailer (&state->string, '-');
-      if (*state->string == '-')
+      m_last_retval = get_number_trailer (&m_cur_tok, '-');
+      if (*m_cur_tok == '-')
 	{
 	  const char **temp;
 
@@ -154,43 +177,42 @@ get_number_or_range (struct get_number_or_range_state *state)
 	     Skip the '-', parse and remember the second number,
 	     and also remember the end of the final token.  */
 
-	  temp = &state->end_ptr; 
-	  state->end_ptr = skip_spaces_const (state->string + 1);
-	  state->end_value = get_number_const (temp);
-	  if (state->end_value < state->last_retval) 
+	  temp = &m_end_ptr;
+	  m_end_ptr = skip_spaces (m_cur_tok + 1);
+	  m_end_value = ::get_number (temp);
+	  if (m_end_value < m_last_retval)
 	    {
 	      error (_("inverted range"));
 	    }
-	  else if (state->end_value == state->last_retval)
+	  else if (m_end_value == m_last_retval)
 	    {
 	      /* Degenerate range (number1 == number2).  Advance the
 		 token pointer so that the range will be treated as a
-		 single number.  */ 
-	      state->string = state->end_ptr;
+		 single number.  */
+	      m_cur_tok = m_end_ptr;
 	    }
 	  else
-	    state->in_range = 1;
+	    m_in_range = true;
 	}
     }
-  else if (! state->in_range)
-    error (_("negative value"));
   else
-    {
-      /* state->string points to the '-' that betokens a range.  All
-	 number-parsing has already been done.  Return the next
-	 integer value (one greater than the saved previous value).
-	 Do not advance the token pointer until the end of range
-	 is reached.  */
+    error (_("negative value"));
+  m_finished = *m_cur_tok == '\0';
+  return m_last_retval;
+}
 
-      if (++state->last_retval == state->end_value)
-	{
-	  /* End of range reached; advance token pointer.  */
-	  state->string = state->end_ptr;
-	  state->in_range = 0;
-	}
-    }
-  state->finished = *state->string == '\0';
-  return state->last_retval;
+/* See documentation in cli-utils.h.  */
+
+void
+number_or_range_parser::setup_range (int start_value, int end_value,
+				     const char *end_ptr)
+{
+  gdb_assert (start_value > 0);
+
+  m_in_range = true;
+  m_end_ptr = end_ptr;
+  m_last_retval = start_value - 1;
+  m_end_value = end_value;
 }
 
 /* Accept a number and a string-form list of numbers such as is 
@@ -204,15 +226,13 @@ get_number_or_range (struct get_number_or_range_state *state)
 int
 number_is_in_list (const char *list, int number)
 {
-  struct get_number_or_range_state state;
-
   if (list == NULL || *list == '\0')
     return 1;
 
-  init_number_or_range (&state, list);
-  while (!state.finished)
+  number_or_range_parser parser (list);
+  while (!parser.finished ())
     {
-      int gotnum = get_number_or_range (&state);
+      int gotnum = parser.get_number ();
 
       if (gotnum == 0)
 	error (_("Args must be numbers or '$' variables."));
@@ -224,8 +244,8 @@ number_is_in_list (const char *list, int number)
 
 /* See documentation in cli-utils.h.  */
 
-char *
-remove_trailing_whitespace (const char *start, char *s)
+const char *
+remove_trailing_whitespace (const char *start, const char *s)
 {
   while (s > start && isspace (*(s - 1)))
     --s;
@@ -235,38 +255,38 @@ remove_trailing_whitespace (const char *start, char *s)
 
 /* See documentation in cli-utils.h.  */
 
-char *
-extract_arg_const (const char **arg)
+std::string
+extract_arg (const char **arg)
 {
   const char *result;
 
   if (!*arg)
-    return NULL;
+    return std::string ();
 
   /* Find the start of the argument.  */
-  *arg = skip_spaces_const (*arg);
+  *arg = skip_spaces (*arg);
   if (!**arg)
-    return NULL;
+    return std::string ();
   result = *arg;
 
   /* Find the end of the argument.  */
-  *arg = skip_to_space_const (*arg + 1);
+  *arg = skip_to_space (*arg + 1);
 
   if (result == *arg)
-    return NULL;
+    return std::string ();
 
-  return savestring (result, *arg - result);
+  return std::string (result, *arg - result);
 }
 
 /* See documentation in cli-utils.h.  */
 
-char *
+std::string
 extract_arg (char **arg)
 {
   const char *arg_const = *arg;
-  char *result;
+  std::string result;
 
-  result = extract_arg_const (&arg_const);
+  result = extract_arg (&arg_const);
   *arg += arg_const - *arg;
   return result;
 }
@@ -274,7 +294,7 @@ extract_arg (char **arg)
 /* See documentation in cli-utils.h.  */
 
 int
-check_for_argument (char **str, char *arg, int arg_len)
+check_for_argument (const char **str, const char *arg, int arg_len)
 {
   if (strncmp (*str, arg, arg_len) == 0
       && ((*str)[arg_len] == '\0' || isspace ((*str)[arg_len])))

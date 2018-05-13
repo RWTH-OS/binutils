@@ -1,5 +1,5 @@
 /* C preprocessor macro expansion for GDB.
-   Copyright (C) 2002-2015 Free Software Foundation, Inc.
+   Copyright (C) 2002-2018 Free Software Foundation, Inc.
    Contributed by Red Hat, Inc.
 
    This file is part of GDB.
@@ -53,8 +53,9 @@ struct macro_buffer
 
   /* Zero if TEXT can be safely realloc'ed (i.e., it's its own malloc
      block).  Non-zero if TEXT is actually pointing into the middle of
-     some other block, and we shouldn't reallocate it.  */
-  int shared;
+     some other block, or to a string literal, and we shouldn't
+     reallocate it.  */
+  bool shared;
 
   /* For detecting token splicing. 
 
@@ -85,19 +86,22 @@ init_buffer (struct macro_buffer *b, int n)
   else
     b->text = NULL;
   b->len = 0;
-  b->shared = 0;
+  b->shared = false;
   b->last_token = -1;
 }
 
 
 /* Set the macro buffer *BUF to refer to the LEN bytes at ADDR, as a
    shared substring.  */
+
 static void
-init_shared_buffer (struct macro_buffer *buf, char *addr, int len)
+init_shared_buffer (struct macro_buffer *buf, const char *addr, int len)
 {
-  buf->text = addr;
+  /* The function accept a "const char *" addr so that clients can
+     pass in string literals without casts.  */
+  buf->text = (char *) addr;
   buf->len = len;
-  buf->shared = 1;
+  buf->shared = true;
   buf->size = 0;
   buf->last_token = -1;
 }
@@ -166,7 +170,7 @@ appendc (struct macro_buffer *b, int c)
 
 /* Append the LEN bytes at ADDR to the buffer B.  */
 static void
-appendmem (struct macro_buffer *b, char *addr, int len)
+appendmem (struct macro_buffer *b, const char *addr, int len)
 {
   int new_len = b->len + len;
 
@@ -942,6 +946,30 @@ find_parameter (const struct macro_buffer *tok,
   return -1;
 }
  
+/* Helper function for substitute_args that gets the next token and
+   updates the passed-in state variables.  */
+
+static void
+get_next_token_for_substitution (struct macro_buffer *replacement_list,
+				 struct macro_buffer *token,
+				 char **start,
+				 struct macro_buffer *lookahead,
+				 char **lookahead_start,
+				 int *lookahead_valid,
+				 bool *keep_going)
+{
+  if (!*lookahead_valid)
+    *keep_going = false;
+  else
+    {
+      *keep_going = true;
+      *token = *lookahead;
+      *start = *lookahead_start;
+      *lookahead_start = replacement_list->text;
+      *lookahead_valid = get_token (lookahead, replacement_list);
+    }
+}
+
 /* Given the macro definition DEF, being invoked with the actual
    arguments given by ARGC and ARGV, substitute the arguments into the
    replacement list, and store the result in DEST.
@@ -980,7 +1008,7 @@ substitute_args (struct macro_buffer *dest,
      lexed.  */
   char *lookahead_rl_start;
 
-  init_shared_buffer (&replacement_list, (char *) def->replacement,
+  init_shared_buffer (&replacement_list, def->replacement,
                       strlen (def->replacement));
 
   gdb_assert (dest->len == 0);
@@ -992,8 +1020,64 @@ substitute_args (struct macro_buffer *dest,
   lookahead_rl_start = replacement_list.text;
   lookahead_valid = get_token (&lookahead, &replacement_list);
 
-  for (;;)
+  /* __VA_OPT__ state variable.  The states are:
+     0 - nothing happening
+     1 - saw __VA_OPT__
+     >= 2 in __VA_OPT__, the value encodes the parenthesis depth.  */
+  unsigned vaopt_state = 0;
+
+  for (bool keep_going = true;
+       keep_going;
+       get_next_token_for_substitution (&replacement_list,
+					&tok,
+					&original_rl_start,
+					&lookahead,
+					&lookahead_rl_start,
+					&lookahead_valid,
+					&keep_going))
     {
+      bool token_is_vaopt = (tok.len == 10
+			     && strncmp (tok.text, "__VA_OPT__", 10) == 0);
+
+      if (vaopt_state > 0)
+	{
+	  if (token_is_vaopt)
+	    error (_("__VA_OPT__ cannot appear inside __VA_OPT__"));
+	  else if (tok.len == 1 && tok.text[0] == '(')
+	    {
+	      ++vaopt_state;
+	      /* We just entered __VA_OPT__, so don't emit this
+		 token.  */
+	      continue;
+	    }
+	  else if (vaopt_state == 1)
+	    error (_("__VA_OPT__ must be followed by an open parenthesis"));
+	  else if (tok.len == 1 && tok.text[0] == ')')
+	    {
+	      --vaopt_state;
+	      if (vaopt_state == 1)
+		{
+		  /* Done with __VA_OPT__.  */
+		  vaopt_state = 0;
+		  /* Don't emit.  */
+		  continue;
+		}
+	    }
+
+	  /* If __VA_ARGS__ is empty, then drop the contents of
+	     __VA_OPT__.  */
+	  if (argv[argc - 1].len == 0)
+	    continue;
+	}
+      else if (token_is_vaopt)
+	{
+	  if (!is_varargs)
+	    error (_("__VA_OPT__ is only valid in a variadic macro"));
+	  vaopt_state = 1;
+	  /* Don't emit this token.  */
+	  continue;
+	}
+
       /* Just for aesthetics.  If we skipped some whitespace, copy
          that to DEST.  */
       if (tok.text > original_rl_start)
@@ -1153,16 +1237,10 @@ substitute_args (struct macro_buffer *dest,
 	  if (! substituted)
 	    append_tokens_without_splicing (dest, &tok);
 	}
-
-      if (! lookahead_valid)
-	break;
-
-      tok = lookahead;
-      original_rl_start = lookahead_rl_start;
-
-      lookahead_rl_start = replacement_list.text;
-      lookahead_valid = get_token (&lookahead, &replacement_list);
     }
+
+  if (vaopt_state > 0)
+    error (_("Unterminated __VA_OPT__"));
 }
 
 
@@ -1199,7 +1277,7 @@ expand (const char *id,
     {
       struct macro_buffer replacement_list;
 
-      init_shared_buffer (&replacement_list, (char *) def->replacement,
+      init_shared_buffer (&replacement_list, def->replacement,
                           strlen (def->replacement));
 
       scan (dest, &replacement_list, &new_no_loop, lookup_func, lookup_baton);
@@ -1236,7 +1314,7 @@ expand (const char *id,
 		     substitution parameter is the name of the formal
 		     argument without the "...".  */
 		  init_shared_buffer (&va_arg_name,
-				      (char *) def->argv[def->argc - 1],
+				      def->argv[def->argc - 1],
 				      len - 3);
 		  is_varargs = 1;
 		}
@@ -1415,7 +1493,7 @@ macro_expand (const char *source,
   struct macro_buffer src, dest;
   struct cleanup *back_to;
 
-  init_shared_buffer (&src, (char *) source, strlen (source));
+  init_shared_buffer (&src, source, strlen (source));
 
   init_buffer (&dest, 0);
   dest.last_token = 0;
@@ -1448,7 +1526,7 @@ macro_expand_next (const char **lexptr,
   struct cleanup *back_to;
 
   /* Set up SRC to refer to the input text, pointed to by *lexptr.  */
-  init_shared_buffer (&src, (char *) *lexptr, strlen (*lexptr));
+  init_shared_buffer (&src, *lexptr, strlen (*lexptr));
 
   /* Set up DEST to receive the expansion, if there is one.  */
   init_buffer (&dest, 0);

@@ -1,6 +1,6 @@
 /* A simple growing buffer for GDB.
   
-   Copyright (C) 2009-2015 Free Software Foundation, Inc.
+   Copyright (C) 2009-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -31,13 +31,22 @@ struct buffer
    accommodate the new data.  */
 void buffer_grow (struct buffer *buffer, const char *data, size_t size);
 
+/* Append C to the end of BUFFER.  Grows the buffer to accommodate the
+   new data.  */
+
+static inline void
+buffer_grow_char (struct buffer *buffer, char c)
+{
+  buffer_grow (buffer, &c, 1);
+}
+
 /* Release any memory held by BUFFER.  */
 void buffer_free (struct buffer *buffer);
 
 /* Initialize BUFFER.  BUFFER holds no memory afterwards.  */
 void buffer_init (struct buffer *buffer);
 
-/* Return a pointer into BUFFER data, effectivelly transfering
+/* Return a pointer into BUFFER data, effectively transferring
    ownership of the buffer memory to the caller.  Calling buffer_free
    afterwards has no effect on the returned data.  */
 char* buffer_finish (struct buffer *buffer);

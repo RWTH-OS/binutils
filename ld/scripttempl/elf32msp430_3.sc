@@ -1,11 +1,11 @@
-# Copyright (C) 2014-2015 Free Software Foundation, Inc.
-# 
+# Copyright (C) 2014-2018 Free Software Foundation, Inc.
+#
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
 # notice and this notice are preserved.
 
 cat <<EOF
-/* Copyright (C) 2014-2015 Free Software Foundation, Inc.
+/* Copyright (C) 2014-2018 Free Software Foundation, Inc.
 
    Copying and distribution of this script, with or without modification,
    are permitted in any medium without royalty provided the copyright
@@ -17,7 +17,7 @@ OUTPUT_ARCH(${ARCH})
 MEMORY
 {
   text   (rx)   : ORIGIN = $ROM_START,  LENGTH = $ROM_SIZE
-  data   (rwx)  : ORIGIN = $RAM_START, 	LENGTH = $RAM_SIZE
+  data   (rwx)  : ORIGIN = $RAM_START,	LENGTH = $RAM_SIZE
   vectors (rw)  : ORIGIN = 0xffe0,      LENGTH = 0x20
 }
 
@@ -137,7 +137,7 @@ SECTIONS
   } ${RELOCATING+ > text}
 
   .data ${RELOCATING-0} :
-  {  
+  {
     ${RELOCATING+ PROVIDE (__data_start = .) ; }
     ${RELOCATING+. = ALIGN(2);}
     *(.data)
@@ -146,15 +146,20 @@ SECTIONS
     ${RELOCATING+. = ALIGN(2);}
     ${RELOCATING+ _edata = . ; }
   } ${RELOCATING+ > data ${RELOCATING+AT> text}}
-  
+
+  __romdatastart = LOADADDR(.data);
+  __romdatacopysize = SIZEOF(.data);
+
   .bss ${RELOCATING+ SIZEOF(.data) + ADDR(.data)} :
   {
     ${RELOCATING+. = ALIGN(2);}
     ${RELOCATING+ PROVIDE (__bss_start = .) ; }
+    ${RELOCATING+ PROVIDE (__bssstart = .); }
     *(.bss)
     *(COMMON)
     ${RELOCATING+ PROVIDE (__bss_end = .) ; }
   } ${RELOCATING+ > data}
+  ${RELOCATING+ PROVIDE (__bsssize = SIZEOF(.bss)); }
 
   .noinit ${RELOCATING+ SIZEOF(.bss) + ADDR(.bss)} :
   {
@@ -180,7 +185,7 @@ SECTIONS
     ${RELOCATING+ _vectors_end = . ; }
   } ${RELOCATING+ > vectors}
 
-  .MP430.attributes 0 :
+  .MSP430.attributes 0 :
   {
     KEEP (*(.MSP430.attributes))
     KEEP (*(.gnu.attributes))
@@ -188,14 +193,14 @@ SECTIONS
   }
 
   /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) } 
+  .stab 0 : { *(.stab) }
   .stabstr 0 : { *(.stabstr) }
   .stab.excl 0 : { *(.stab.excl) }
   .stab.exclstr 0 : { *(.stab.exclstr) }
   .stab.index 0 : { *(.stab.index) }
   .stab.indexstr 0 : { *(.stab.indexstr) }
   .comment 0 : { *(.comment) }
- 
+
 EOF
 
 . $srcdir/scripttempl/DWARF.sc

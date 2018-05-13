@@ -1,6 +1,6 @@
 /* Interface between gdb and its extension languages.
 
-   Copyright (C) 2014-2015 Free Software Foundation, Inc.
+   Copyright (C) 2014-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -22,6 +22,7 @@
 
 #include "defs.h"
 #include <signal.h>
+#include "target.h"
 #include "auto-load.h"
 #include "breakpoint.h"
 #include "event-top.h"
@@ -477,11 +478,11 @@ free_ext_lang_type_printers (struct ext_lang_type_printers *printers)
   xfree (printers);
 }
 
-/* Try to pretty-print a value of type TYPE located at VALADDR
-   + EMBEDDED_OFFSET, which came from the inferior at address ADDRESS
-   + EMBEDDED_OFFSET, onto stdio stream STREAM according to OPTIONS.
-   VAL is the whole object that came from ADDRESS.  VALADDR must point to
-   the head of VAL's contents buffer.
+/* Try to pretty-print a value of type TYPE located at VAL's contents
+   buffer + EMBEDDED_OFFSET, which came from the inferior at address
+   ADDRESS + EMBEDDED_OFFSET, onto stdio stream STREAM according to
+   OPTIONS.
+   VAL is the whole object that came from ADDRESS.
    Returns non-zero if the value was successfully pretty-printed.
 
    Extension languages are tried in the order specified by
@@ -495,10 +496,10 @@ free_ext_lang_type_printers (struct ext_lang_type_printers *printers)
    errors that trigger an exception in the extension language.  */
 
 int
-apply_ext_lang_val_pretty_printer (struct type *type, const gdb_byte *valaddr,
-				   int embedded_offset, CORE_ADDR address,
+apply_ext_lang_val_pretty_printer (struct type *type,
+				   LONGEST embedded_offset, CORE_ADDR address,
 				   struct ui_file *stream, int recurse,
-				   const struct value *val,
+				   struct value *val,
 				   const struct value_print_options *options,
 				   const struct language_defn *language)
 {
@@ -511,7 +512,7 @@ apply_ext_lang_val_pretty_printer (struct type *type, const gdb_byte *valaddr,
 
       if (extlang->ops->apply_val_pretty_printer == NULL)
 	continue;
-      rc = extlang->ops->apply_val_pretty_printer (extlang, type, valaddr,
+      rc = extlang->ops->apply_val_pretty_printer (extlang, type,
 						   embedded_offset, address,
 						   stream, recurse, val,
 						   options, language);
@@ -746,19 +747,24 @@ set_active_ext_lang (const struct extension_language_defn *now_active)
     = XCNEW (struct active_ext_lang_state);
 
   previous->ext_lang = active_ext_lang;
+  previous->sigint_handler.handler_saved = 0;
   active_ext_lang = now_active;
 
-  /* If the newly active extension language uses cooperative SIGINT handling
-     then ensure GDB's SIGINT handler is installed.  */
-  if (now_active->language == EXT_LANG_GDB
-      || now_active->ops->check_quit_flag != NULL)
-    install_gdb_sigint_handler (&previous->sigint_handler);
+  if (target_terminal::is_ours ())
+    {
+      /* If the newly active extension language uses cooperative SIGINT
+	 handling then ensure GDB's SIGINT handler is installed.  */
+      if (now_active->language == EXT_LANG_GDB
+	  || now_active->ops->check_quit_flag != NULL)
+	install_gdb_sigint_handler (&previous->sigint_handler);
 
-  /* If there's a SIGINT recorded in the cooperative extension languages,
-     move it to the new language, or save it in GDB's global flag if the newly
-     active extension language doesn't use cooperative SIGINT handling.  */
-  if (check_quit_flag ())
-    set_quit_flag ();
+      /* If there's a SIGINT recorded in the cooperative extension languages,
+	 move it to the new language, or save it in GDB's global flag if the
+	 newly active extension language doesn't use cooperative SIGINT
+	 handling.  */
+      if (check_quit_flag ())
+	set_quit_flag ();
+    }
 
   return previous;
 }
@@ -768,40 +774,22 @@ set_active_ext_lang (const struct extension_language_defn *now_active)
 void
 restore_active_ext_lang (struct active_ext_lang_state *previous)
 {
-  const struct extension_language_defn *current = active_ext_lang;
-
   active_ext_lang = previous->ext_lang;
 
-  /* Restore the previous SIGINT handler if one was saved.  */
-  if (previous->sigint_handler.handler_saved)
-    install_sigint_handler (&previous->sigint_handler);
-
-  /* If there's a SIGINT recorded in the cooperative extension languages,
-     move it to the new language, or save it in GDB's global flag if the newly
-     active extension language doesn't use cooperative SIGINT handling.  */
-  if (check_quit_flag ())
-    set_quit_flag ();
-
-  xfree (previous);
-}
-
-/* Clear the quit flag.
-   The flag is cleared in all extension languages,
-   not just the currently active one.  */
-
-void
-clear_quit_flag (void)
-{
-  int i;
-  const struct extension_language_defn *extlang;
-
-  ALL_ENABLED_EXTENSION_LANGUAGES (i, extlang)
+  if (target_terminal::is_ours ())
     {
-      if (extlang->ops->clear_quit_flag != NULL)
-	extlang->ops->clear_quit_flag (extlang);
-    }
+      /* Restore the previous SIGINT handler if one was saved.  */
+      if (previous->sigint_handler.handler_saved)
+	install_sigint_handler (&previous->sigint_handler);
 
-  quit_flag = 0;
+      /* If there's a SIGINT recorded in the cooperative extension languages,
+	 move it to the new language, or save it in GDB's global flag if the
+	 newly active extension language doesn't use cooperative SIGINT
+	 handling.  */
+      if (check_quit_flag ())
+	set_quit_flag ();
+    }
+  xfree (previous);
 }
 
 /* Set the quit flag.
@@ -819,7 +807,16 @@ set_quit_flag (void)
       && active_ext_lang->ops->set_quit_flag != NULL)
     active_ext_lang->ops->set_quit_flag (active_ext_lang);
   else
-    quit_flag = 1;
+    {
+      quit_flag = 1;
+
+      /* Now wake up the event loop, or any interruptible_select.  Do
+	 this after setting the flag, because signals on Windows
+	 actually run on a separate thread, and thus otherwise the
+	 main code could be woken up and find quit_flag still
+	 clear.  */
+      quit_serial_event_set ();
+    }
 }
 
 /* Return true if the quit flag has been set, false otherwise.
@@ -843,74 +840,28 @@ check_quit_flag (void)
   /* This is written in a particular way to avoid races.  */
   if (quit_flag)
     {
+      /* No longer need to wake up the event loop or any
+	 interruptible_select.  The caller handles the quit
+	 request.  */
+      quit_serial_event_clear ();
       quit_flag = 0;
       result = 1;
     }
 
   return result;
 }
-
-/* xmethod support.  */
 
-/* The xmethod API routines do not have "ext_lang" in the name because
-   the name "xmethod" implies that this routine deals with extension
-   languages.  Plus some of the methods take a xmethod_foo * "self/this"
-   arg, not an extension_language_defn * arg.  */
+/* See extension.h.  */
 
-/* Returns a new xmethod_worker with EXTLANG and DATA.  Space for the
-   result must be freed with free_xmethod_worker.  */
-
-struct xmethod_worker *
-new_xmethod_worker (const struct extension_language_defn *extlang, void *data)
+void
+get_matching_xmethod_workers (struct type *type, const char *method_name,
+			      std::vector<xmethod_worker_up> *workers)
 {
-  struct xmethod_worker *worker = XCNEW (struct xmethod_worker);
-
-  worker->extlang = extlang;
-  worker->data = data;
-  worker->value = NULL;
-
-  return worker;
-}
-
-/* Clones WORKER and returns a new but identical worker.
-   The function get_matching_xmethod_workers (see below), returns a
-   vector of matching workers.  If a particular worker is selected by GDB
-   to invoke a method, then this function can help in cloning the
-   selected worker and freeing up the vector via a cleanup.
-
-   Space for the result must be freed with free_xmethod_worker.  */
-
-struct xmethod_worker *
-clone_xmethod_worker (struct xmethod_worker *worker)
-{
-  struct xmethod_worker *new_worker;
-  const struct extension_language_defn *extlang = worker->extlang;
-
-  gdb_assert (extlang->ops->clone_xmethod_worker_data != NULL);
-
-  new_worker = new_xmethod_worker
-    (extlang,
-     extlang->ops->clone_xmethod_worker_data (extlang, worker->data));
-
-  return new_worker;
-}
-
-/* If a method with name METHOD_NAME is to be invoked on an object of type
-   TYPE, then all entension languages are searched for implementations of
-   methods with name METHOD.  All matches found are returned as a vector
-   of 'xmethod_worker_ptr' objects.  If no matching methods are
-   found, NULL is returned.  */
-
-VEC (xmethod_worker_ptr) *
-get_matching_xmethod_workers (struct type *type, const char *method_name)
-{
-  VEC (xmethod_worker_ptr) *workers = NULL;
   int i;
   const struct extension_language_defn *extlang;
 
   ALL_ENABLED_EXTENSION_LANGUAGES (i, extlang)
     {
-      VEC (xmethod_worker_ptr) *lang_workers, *new_vec;
       enum ext_lang_rc rc;
 
       /* If an extension language does not support xmethods, ignore
@@ -920,115 +871,45 @@ get_matching_xmethod_workers (struct type *type, const char *method_name)
 
       rc = extlang->ops->get_matching_xmethod_workers (extlang,
 						       type, method_name,
-						       &lang_workers);
+						       workers);
       if (rc == EXT_LANG_RC_ERROR)
-	{
-	  free_xmethod_worker_vec (workers);
-	  error (_("Error while looking for matching xmethod workers "
-		   "defined in %s."), extlang->capitalized_name);
-	}
-
-      new_vec = VEC_merge (xmethod_worker_ptr, workers, lang_workers);
-      /* Free only the vectors and not the elements as NEW_VEC still
-	 contains them.  */
-      VEC_free (xmethod_worker_ptr, workers);
-      VEC_free (xmethod_worker_ptr, lang_workers);
-      workers = new_vec;
+	error (_("Error while looking for matching xmethod workers "
+		 "defined in %s."), extlang->capitalized_name);
     }
-
-  return workers;
 }
 
-/* Return the arg types of the xmethod encapsulated in WORKER.
-   An array of arg types is returned.  The length of the array is returned in
-   NARGS.  The type of the 'this' object is returned as the first element of
-   array.  */
+/* See extension.h.  */
 
-struct type **
-get_xmethod_arg_types (struct xmethod_worker *worker, int *nargs)
+type **
+xmethod_worker::get_arg_types (int *nargs)
 {
-  enum ext_lang_rc rc;
-  struct type **type_array = NULL;
-  const struct extension_language_defn *extlang = worker->extlang;
+  type **type_array = NULL;
 
-  gdb_assert (extlang->ops->get_xmethod_arg_types != NULL);
-
-  rc = extlang->ops->get_xmethod_arg_types (extlang, worker, nargs,
-					    &type_array);
+  ext_lang_rc rc = do_get_arg_types (nargs, &type_array);
   if (rc == EXT_LANG_RC_ERROR)
-    {
-      error (_("Error while looking for arg types of a xmethod worker "
-	       "defined in %s."), extlang->capitalized_name);
-    }
+    error (_("Error while looking for arg types of a xmethod worker "
+	     "defined in %s."), m_extlang->capitalized_name);
 
   return type_array;
 }
 
-/* Return the type of the result of the xmethod encapsulated in WORKER.
-   OBJECT, ARGS, NARGS are the same as for invoke_xmethod.  */
+/* See extension.h.  */
 
 struct type *
-get_xmethod_result_type (struct xmethod_worker *worker,
-			 struct value *object, struct value **args, int nargs)
+xmethod_worker::get_result_type (value *object, value **args, int nargs)
 {
-  enum ext_lang_rc rc;
-  struct type *result_type;
-  const struct extension_language_defn *extlang = worker->extlang;
+  type *result_type;
 
-  gdb_assert (extlang->ops->get_xmethod_arg_types != NULL);
-
-  rc = extlang->ops->get_xmethod_result_type (extlang, worker,
-					      object, args, nargs,
-					      &result_type);
+  ext_lang_rc rc = do_get_result_type (object, args, nargs, &result_type);
   if (rc == EXT_LANG_RC_ERROR)
     {
       error (_("Error while fetching result type of an xmethod worker "
-	       "defined in %s."), extlang->capitalized_name);
+	       "defined in %s."), m_extlang->capitalized_name);
     }
 
   return result_type;
 }
 
-/* Invokes the xmethod encapsulated in WORKER and returns the result.
-   The method is invoked on OBJ with arguments in the ARGS array.  NARGS is
-   the length of the this array.  */
-
-struct value *
-invoke_xmethod (struct xmethod_worker *worker, struct value *obj,
-		     struct value **args, int nargs)
-{
-  gdb_assert (worker->extlang->ops->invoke_xmethod != NULL);
-
-  return worker->extlang->ops->invoke_xmethod (worker->extlang, worker,
-					       obj, args, nargs);
-}
-
-/* Frees the xmethod worker WORKER.  */
-
-void
-free_xmethod_worker (struct xmethod_worker *worker)
-{
-  gdb_assert (worker->extlang->ops->free_xmethod_worker_data != NULL);
-  worker->extlang->ops->free_xmethod_worker_data (worker->extlang,
-						  worker->data);
-  xfree (worker);
-}
-
-/* Frees a vector of xmethod_workers VEC.  */
-
-void
-free_xmethod_worker_vec (void *vec)
-{
-  int i;
-  struct xmethod_worker *worker;
-  VEC (xmethod_worker_ptr) *v = (VEC (xmethod_worker_ptr) *) vec;
-
-  for (i = 0; VEC_iterate (xmethod_worker_ptr, v, i, worker); i++)
-    free_xmethod_worker (worker);
-
-  VEC_free (xmethod_worker_ptr, v);
-}
-
 /* Called via an observer before gdb prints its prompt.
    Iterate over the extension languages giving them a chance to
    change the prompt.  The first one to change the prompt wins,
@@ -1059,8 +940,6 @@ ext_lang_before_prompt (const char *current_gdb_prompt)
 	}
     }
 }
-
-extern initialize_file_ftype _initialize_extension;
 
 void
 _initialize_extension (void)

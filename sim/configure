@@ -634,7 +634,8 @@ CFLAGS
 LDFLAGS
 LIBS
 CPPFLAGS'
-ac_subdirs_all='arm
+ac_subdirs_all='aarch64
+arm
 avr
 bfin
 cr16
@@ -652,6 +653,7 @@ microblaze
 mips
 mn10300
 moxie
+or1k
 msp430
 rl78
 rx
@@ -662,7 +664,6 @@ ppc
 ft32
 v850
 testsuite
-common
 igen'
 
 # Initialize some variables set by options.
@@ -3589,10 +3590,12 @@ fi
 
 
 # Put a plausible default for CC_FOR_BUILD in Makefile.
-if test "x$cross_compiling" = "xno"; then
-  CC_FOR_BUILD='$(CC)'
-else
-  CC_FOR_BUILD=gcc
+if test -z "$CC_FOR_BUILD"; then
+  if test "x$cross_compiling" = "xno"; then
+    CC_FOR_BUILD='$(CC)'
+  else
+    CC_FOR_BUILD=gcc
+  fi
 fi
 
 CFLAGS_FOR_BUILD=${CFLAGS_FOR_BUILD-${CFLAGS}}
@@ -3621,16 +3624,22 @@ if test "${enable_sim}" != no; then
 
 
 
-sim_common=yes
 sim_igen=no
 sim_arch=
 case "${target}" in
+   aarch64*-*-*)
+
+  sim_arch=aarch64
+
+
+subdirs="$subdirs aarch64"
+
+
+       ;;
    arm*-*-*)
 
   sim_arch=arm
-
-
-subdirs="$subdirs arm"
+  subdirs="$subdirs arm"
 
 
        ;;
@@ -3762,6 +3771,14 @@ subdirs="$subdirs arm"
 
 
        ;;
+   or1k-*-* | or1knd-*-*)
+
+  sim_arch=or1k
+  subdirs="$subdirs or1k"
+
+
+       sim_testsuite=yes
+       ;;
    rl78-*-*)
 
   sim_arch=rl78
@@ -3819,19 +3836,11 @@ subdirs="$subdirs arm"
 
        sim_igen=yes
        ;;
-   *)
-       # No simulator subdir, so the subdir "common" isn't needed.
-       sim_common=no
-       ;;
 esac
 
 
    subdirs="$subdirs testsuite"
 
-   if test "$sim_common" = yes; then
-      subdirs="$subdirs common"
-
-   fi
    if test "$sim_igen" = yes; then
       subdirs="$subdirs igen"
 

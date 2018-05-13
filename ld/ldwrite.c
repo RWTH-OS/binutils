@@ -1,5 +1,5 @@
 /* ldwrite.c -- write out the linked file
-   Copyright (C) 1991-2015 Free Software Foundation, Inc.
+   Copyright (C) 1991-2018 Free Software Foundation, Inc.
    Written by Steve Chamberlain sac@cygnus.com
 
    This file is part of the GNU Binutils.
@@ -91,17 +91,17 @@ build_link_order (lang_statement_union_type *statement)
 		big_endian = TRUE;
 		{
 		  LANG_FOR_EACH_INPUT_STATEMENT (s)
-		    {
-		      if (s->the_bfd != NULL)
-			{
-			  if (bfd_little_endian (s->the_bfd))
-			    {
-			      big_endian = FALSE;
-			      swap = TRUE;
-			    }
-			  break;
-			}
-		    }
+		  {
+		    if (s->the_bfd != NULL)
+		      {
+			if (bfd_little_endian (s->the_bfd))
+			  {
+			    big_endian = FALSE;
+			    swap = TRUE;
+			  }
+			break;
+		      }
+		  }
 		}
 	      }
 
@@ -209,7 +209,7 @@ build_link_order (lang_statement_union_type *statement)
 	link_order->size = bfd_get_reloc_size (rs->howto);
 
 	link_order->u.reloc.p = (struct bfd_link_order_reloc *)
-            xmalloc (sizeof (struct bfd_link_order_reloc));
+	  xmalloc (sizeof (struct bfd_link_order_reloc));
 
 	link_order->u.reloc.p->reloc = rs->reloc;
 	link_order->u.reloc.p->addend = rs->addend_value;
@@ -254,6 +254,8 @@ build_link_order (lang_statement_union_type *statement)
 
 	    link_order = bfd_new_link_order (link_info.output_bfd,
 					     output_section);
+	    if (link_order == NULL)
+	      einfo (_("%P%F: bfd_new_link_order failed\n"));
 
 	    if ((i->flags & SEC_NEVER_LOAD) != 0
 		&& (i->flags & SEC_DEBUGGING) == 0)
@@ -293,6 +295,8 @@ build_link_order (lang_statement_union_type *statement)
 
 	link_order = bfd_new_link_order (link_info.output_bfd,
 					 output_section);
+	if (link_order == NULL)
+	  einfo (_("%P%F: bfd_new_link_order failed\n"));
 	link_order->type = bfd_data_link_order;
 	link_order->size = statement->padding_statement.size;
 	link_order->offset = statement->padding_statement.output_offset;
@@ -409,13 +413,9 @@ ds (asection *s)
   while (l)
     {
       if (l->type == bfd_indirect_link_order)
-	{
-	  printf ("%8x %s\n", l->offset, l->u.indirect.section->owner->filename);
-	}
+	printf ("%8x %s\n", l->offset, l->u.indirect.section->owner->filename);
       else
-	{
-	  printf (_("%8x something else\n"), l->offset);
-	}
+	printf (_("%8x something else\n"), l->offset);
       l = l->next;
     }
   printf ("\n");

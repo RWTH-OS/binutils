@@ -1,6 +1,6 @@
 /* YACC parser for D expressions, for GDB.
 
-   Copyright (C) 2014-2015 Free Software Foundation, Inc.
+   Copyright (C) 2014-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -55,65 +55,10 @@
 #define parse_type(ps) builtin_type (parse_gdbarch (ps))
 #define parse_d_type(ps) builtin_d_type (parse_gdbarch (ps))
 
-/* Remap normal yacc parser interface names (yyparse, yylex, yyerror, etc),
-   as well as gratuitiously global symbol names, so we can have multiple
-   yacc generated parsers in gdb.  Note that these are only the variables
-   produced by yacc.  If other parser generators (bison, byacc, etc) produce
-   additional global names that conflict at link time, then those parser
-   generators need to be fixed instead of adding those names to this list.  */
-
-#define	yymaxdepth d_maxdepth
-#define	yyparse	d_parse_internal
-#define	yylex	d_lex
-#define	yyerror	d_error
-#define	yylval	d_lval
-#define	yychar	d_char
-#define	yydebug	d_debug
-#define	yypact	d_pact
-#define	yyr1	d_r1
-#define	yyr2	d_r2
-#define	yydef	d_def
-#define	yychk	d_chk
-#define	yypgo	d_pgo
-#define	yyact	d_act
-#define	yyexca	d_exca
-#define	yyerrflag d_errflag
-#define	yynerrs	d_nerrs
-#define	yyps	d_ps
-#define	yypv	d_pv
-#define	yys	d_s
-#define	yy_yys	d_yys
-#define	yystate	d_state
-#define	yytmp	d_tmp
-#define	yyv	d_v
-#define	yy_yyv	d_yyv
-#define	yyval	d_val
-#define	yylloc	d_lloc
-#define	yyreds	d_reds	/* With YYDEBUG defined */
-#define	yytoks	d_toks	/* With YYDEBUG defined */
-#define	yyname	d_name	/* With YYDEBUG defined */
-#define	yyrule	d_rule	/* With YYDEBUG defined */
-#define	yylhs	d_yylhs
-#define	yylen	d_yylen
-#define	yydefre	d_yydefred
-#define	yydgoto	d_yydgoto
-#define	yysindex d_yysindex
-#define	yyrindex d_yyrindex
-#define	yygindex d_yygindex
-#define	yytable	d_yytable
-#define	yycheck	d_yycheck
-#define	yyss	d_yyss
-#define	yysslim	d_yysslim
-#define	yyssp	d_yyssp
-#define	yystacksize d_yystacksize
-#define	yyvs	d_yyvs
-#define	yyvsp	d_yyvsp
-
-#ifndef YYDEBUG
-#define YYDEBUG 1	/* Default to yydebug support */
-#endif
-
-#define YYFPRINTF parser_fprintf
+/* Remap normal yacc parser interface names (yyparse, yylex, yyerror,
+   etc).  */
+#define GDB_YY_REMAP_PREFIX d_
+#include "yy-remap.h"
 
 /* The state of the parser, used internally when we are parsing the
    expression.  */
@@ -124,7 +69,7 @@ int yyparse (void);
 
 static int yylex (void);
 
-void yyerror (char *);
+void yyerror (const char *);
 
 static int type_aggregate_p (struct type *);
 
@@ -141,7 +86,7 @@ static int type_aggregate_p (struct type *);
       struct type *type;
     } typed_val_int;
     struct {
-      DOUBLEST dval;
+      gdb_byte val[16];
       struct type *type;
     } typed_val_float;
     struct symbol *sym;
@@ -376,15 +321,12 @@ UnaryExpression:
 
 CastExpression:
 	CAST_KEYWORD '(' TypeExp ')' UnaryExpression
-		{ write_exp_elt_opcode (pstate, UNOP_CAST);
-		  write_exp_elt_type (pstate, $3);
-		  write_exp_elt_opcode (pstate, UNOP_CAST); }
+		{ write_exp_elt_opcode (pstate, UNOP_CAST_TYPE); }
 	/* C style cast is illegal D, but is still recognised in
 	   the grammar, so we keep this around for convenience.  */
 |	'(' TypeExp ')' UnaryExpression
-		{ write_exp_elt_opcode (pstate, UNOP_CAST);
-		  write_exp_elt_type (pstate, $2);
-		  write_exp_elt_opcode (pstate, UNOP_CAST); }
+		{ write_exp_elt_opcode (pstate, UNOP_CAST_TYPE); }
+
 ;
 
 PowExpression:
@@ -528,15 +470,14 @@ PrimaryExpression:
 			      struct block_symbol sym;
 			      const char *type_name = TYPE_SAFE_NAME (type);
 			      int type_name_len = strlen (type_name);
-			      char *name;
-
-			      name = xstrprintf ("%.*s.%.*s",
+			      std::string name
+				= string_printf ("%.*s.%.*s",
 						 type_name_len, type_name,
 						 $3.length, $3.ptr);
-			      make_cleanup (xfree, name);
 
 			      sym =
-				lookup_symbol (name, (const struct block *) NULL,
+				lookup_symbol (name.c_str (),
+					       (const struct block *) NULL,
 					       VAR_DOMAIN, NULL);
 			      if (sym.symbol)
 				{
@@ -547,13 +488,14 @@ PrimaryExpression:
 				  break;
 				}
 
-			      msymbol = lookup_bound_minimal_symbol (name);
+			      msymbol = lookup_bound_minimal_symbol (name.c_str ());
 			      if (msymbol.minsym != NULL)
 				write_exp_msymbol (pstate, msymbol);
 			      else if (!have_full_symbols () && !have_partial_symbols ())
 				error (_("No symbol table is loaded.  Use the \"file\" command."));
 			      else
-				error (_("No symbol \"%s\" in current context."), name);
+				error (_("No symbol \"%s\" in current context."),
+				       name.c_str ());
 			    }
 
 			  /* Check if the qualified name resolves as a member
@@ -598,10 +540,10 @@ PrimaryExpression:
 		  write_exp_elt_longcst (pstate, (LONGEST)($1.val));
 		  write_exp_elt_opcode (pstate, OP_LONG); }
 |	FLOAT_LITERAL
-		{ write_exp_elt_opcode (pstate, OP_DOUBLE);
+		{ write_exp_elt_opcode (pstate, OP_FLOAT);
 		  write_exp_elt_type (pstate, $1.type);
-		  write_exp_elt_dblcst (pstate, $1.dval);
-		  write_exp_elt_opcode (pstate, OP_DOUBLE); }
+		  write_exp_elt_floatcst (pstate, $1.val);
+		  write_exp_elt_opcode (pstate, OP_FLOAT); }
 |	CHARACTER_LITERAL
 		{ struct stoken_vector vec;
 		  vec.len = 1;
@@ -706,6 +648,7 @@ type_aggregate_p (struct type *type)
 {
   return (TYPE_CODE (type) == TYPE_CODE_STRUCT
 	  || TYPE_CODE (type) == TYPE_CODE_UNION
+	  || TYPE_CODE (type) == TYPE_CODE_MODULE
 	  || (TYPE_CODE (type) == TYPE_CODE_ENUM
 	      && TYPE_DECLARED_CLASS (type)));
 }
@@ -739,9 +682,6 @@ parse_number (struct parser_state *ps, const char *p,
 
   if (parsed_float)
     {
-      const struct builtin_d_type *builtin_d_types;
-      const char *suffix;
-      int suffix_len;
       char *s, *sp;
 
       /* Strip out all embedded '_' before passing to parse_float.  */
@@ -756,54 +696,51 @@ parse_number (struct parser_state *ps, const char *p,
       *sp = '\0';
       len = strlen (s);
 
-      if (! parse_float (s, len, &putithere->typed_val_float.dval, &suffix))
-	return ERROR;
-
-      suffix_len = s + len - suffix;
-
-      if (suffix_len == 0)
+      /* Check suffix for `i' , `fi' or `li' (idouble, ifloat or ireal).  */
+      if (len >= 1 && tolower (s[len - 1]) == 'i')
+	{
+	  if (len >= 2 && tolower (s[len - 2]) == 'f')
+	    {
+	      putithere->typed_val_float.type
+		= parse_d_type (ps)->builtin_ifloat;
+	      len -= 2;
+	    }
+	  else if (len >= 2 && tolower (s[len - 2]) == 'l')
+	    {
+	      putithere->typed_val_float.type
+		= parse_d_type (ps)->builtin_ireal;
+	      len -= 2;
+	    }
+	  else
+	    {
+	      putithere->typed_val_float.type
+		= parse_d_type (ps)->builtin_idouble;
+	      len -= 1;
+	    }
+	}
+      /* Check suffix for `f' or `l'' (float or real).  */
+      else if (len >= 1 && tolower (s[len - 1]) == 'f')
+	{
+	  putithere->typed_val_float.type
+	    = parse_d_type (ps)->builtin_float;
+	  len -= 1;
+	}
+      else if (len >= 1 && tolower (s[len - 1]) == 'l')
+	{
+	  putithere->typed_val_float.type
+	    = parse_d_type (ps)->builtin_real;
+	  len -= 1;
+	}
+      /* Default type if no suffix.  */
+      else
 	{
 	  putithere->typed_val_float.type
 	    = parse_d_type (ps)->builtin_double;
 	}
-      else if (suffix_len == 1)
-	{
-	  /* Check suffix for `f', `l', or `i' (float, real, or idouble).  */
-	  if (tolower (*suffix) == 'f')
-	    {
-	      putithere->typed_val_float.type
-		= parse_d_type (ps)->builtin_float;
-	    }
-	  else if (tolower (*suffix) == 'l')
-	    {
-	      putithere->typed_val_float.type
-		= parse_d_type (ps)->builtin_real;
-	    }
-	  else if (tolower (*suffix) == 'i')
-	    {
-	      putithere->typed_val_float.type
-		= parse_d_type (ps)->builtin_idouble;
-	    }
-	  else
-	    return ERROR;
-	}
-      else if (suffix_len == 2)
-	{
-	  /* Check suffix for `fi' or `li' (ifloat or ireal).  */
-	  if (tolower (suffix[0]) == 'f' && tolower (suffix[1] == 'i'))
-	    {
-	      putithere->typed_val_float.type
-		= parse_d_type (ps)->builtin_ifloat;
-	    }
-	  else if (tolower (suffix[0]) == 'l' && tolower (suffix[1] == 'i'))
-	    {
-	      putithere->typed_val_float.type
-		= parse_d_type (ps)->builtin_ireal;
-	    }
-	  else
-	    return ERROR;
-	}
-      else
+
+      if (!parse_float (s, len,
+			putithere->typed_val_float.type,
+			putithere->typed_val_float.val))
 	return ERROR;
 
       return FLOAT_LITERAL;
@@ -1005,7 +942,7 @@ parse_string_or_char (const char *tokptr, const char **outptr,
   else
     value->type = C_STRING;
 
-  value->ptr = obstack_base (&tempbuf);
+  value->ptr = (char *) obstack_base (&tempbuf);
   value->length = obstack_object_size (&tempbuf);
 
   *outptr = tokptr;
@@ -1015,7 +952,7 @@ parse_string_or_char (const char *tokptr, const char **outptr,
 
 struct token
 {
-  char *oper;
+  const char *oper;
   int token;
   enum exp_opcode opcode;
 };
@@ -1400,7 +1337,7 @@ static int popping;
 
 /* Temporary storage for yylex; this holds symbol names as they are
    built up.  */
-static struct obstack name_obstack;
+static auto_obstack name_obstack;
 
 /* Classify an IDENTIFIER token.  The contents of the token are in `yylval'.
    Updates yylval and returns the new token type.  BLOCK is the block
@@ -1538,7 +1475,7 @@ yylex (void)
      first try building up a name until we find the qualified module.  */
   if (current.token == UNKNOWN_NAME)
     {
-      obstack_free (&name_obstack, obstack_base (&name_obstack));
+      name_obstack.clear ();
       obstack_grow (&name_obstack, current.value.sval.ptr,
 		    current.value.sval.length);
 
@@ -1558,7 +1495,7 @@ yylex (void)
 	      obstack_grow (&name_obstack, next->value.sval.ptr,
 			    next->value.sval.length);
 
-	      yylval.sval.ptr = obstack_base (&name_obstack);
+	      yylval.sval.ptr = (char *) obstack_base (&name_obstack);
 	      yylval.sval.length = obstack_object_size (&name_obstack);
 
 	      current.token = classify_name (pstate, expression_context_block);
@@ -1591,7 +1528,7 @@ yylex (void)
   if (current.token != TYPENAME && current.token != '.')
     goto do_pop;
 
-  obstack_free (&name_obstack, obstack_base (&name_obstack));
+  name_obstack.clear ();
   checkpoint = 0;
   if (current.token == '.')
     search_block = NULL;
@@ -1638,7 +1575,7 @@ yylex (void)
 	  obstack_grow (&name_obstack, next->value.sval.ptr,
 			next->value.sval.length);
 
-	  yylval.sval.ptr = obstack_base (&name_obstack);
+	  yylval.sval.ptr = (char *) obstack_base (&name_obstack);
 	  yylval.sval.length = obstack_object_size (&name_obstack);
 	  current.value = yylval;
 	  current.token = classification;
@@ -1678,18 +1615,13 @@ yylex (void)
 int
 d_parse (struct parser_state *par_state)
 {
-  int result;
-  struct cleanup *back_to;
-
   /* Setting up the parser state.  */
+  scoped_restore pstate_restore = make_scoped_restore (&pstate);
   gdb_assert (par_state != NULL);
   pstate = par_state;
 
-  back_to = make_cleanup (null_cleanup, NULL);
-
-  make_cleanup_restore_integer (&yydebug);
-  make_cleanup_clear_parser_state (&pstate);
-  yydebug = parser_debug;
+  scoped_restore restore_yydebug = make_scoped_restore (&yydebug,
+							parser_debug);
 
   /* Initialize some state used by the lexer.  */
   last_was_structop = 0;
@@ -1697,16 +1629,13 @@ d_parse (struct parser_state *par_state)
 
   VEC_free (token_and_value, token_fifo);
   popping = 0;
-  obstack_init (&name_obstack);
-  make_cleanup_obstack_free (&name_obstack);
+  name_obstack.clear ();
 
-  result = yyparse ();
-  do_cleanups (back_to);
-  return result;
+  return yyparse ();
 }
 
 void
-yyerror (char *msg)
+yyerror (const char *msg)
 {
   if (prev_lexptr)
     lexptr = prev_lexptr;

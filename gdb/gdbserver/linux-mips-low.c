@@ -1,5 +1,5 @@
 /* GNU/Linux/MIPS specific low level interface, for the remote server for GDB.
-   Copyright (C) 1995-2015 Free Software Foundation, Inc.
+   Copyright (C) 1995-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -275,18 +275,6 @@ mips_sw_breakpoint_from_kind (int kind, int *size)
   return (const gdb_byte *) &mips_breakpoint;
 }
 
-/* We only place breakpoints in empty marker functions, and thread locking
-   is outside of the function.  So rather than importing software single-step,
-   we can just run until exit.  */
-static CORE_ADDR
-mips_reinsert_addr (void)
-{
-  struct regcache *regcache = get_thread_regcache (current_thread, 1);
-  union mips_register ra;
-  collect_register_by_name (regcache, "r31", ra.buf);
-  return register_size (regcache->tdesc, 0) == 4 ? ra.reg32 : ra.reg64;
-}
-
 static int
 mips_breakpoint_at (CORE_ADDR where)
 {
@@ -301,31 +289,21 @@ mips_breakpoint_at (CORE_ADDR where)
   return 0;
 }
 
-/* Mark the watch registers of lwp, represented by ENTRY, as changed,
-   if the lwp's process id is *PID_P.  */
+/* Mark the watch registers of lwp, represented by ENTRY, as changed.  */
 
-static int
-update_watch_registers_callback (struct inferior_list_entry *entry,
-				 void *pid_p)
+static void
+update_watch_registers_callback (thread_info *thread)
 {
-  struct thread_info *thread = (struct thread_info *) entry;
   struct lwp_info *lwp = get_thread_lwp (thread);
-  int pid = *(int *) pid_p;
 
-  /* Only update the threads of this process.  */
-  if (pid_of (thread) == pid)
-    {
-      /* The actual update is done later just before resuming the lwp,
-	 we just mark that the registers need updating.  */
-      lwp->arch_private->watch_registers_changed = 1;
+  /* The actual update is done later just before resuming the lwp,
+     we just mark that the registers need updating.  */
+  lwp->arch_private->watch_registers_changed = 1;
 
-      /* If the lwp isn't stopped, force it to momentarily pause, so
-	 we can update its watch registers.  */
-      if (!lwp->stopped)
-	linux_stop_lwp (lwp);
-    }
-
-  return 0;
+  /* If the lwp isn't stopped, force it to momentarily pause, so
+     we can update its watch registers.  */
+  if (!lwp->stopped)
+    linux_stop_lwp (lwp);
 }
 
 /* This is the implementation of linux_target_ops method
@@ -337,6 +315,15 @@ mips_linux_new_process (void)
   struct arch_process_info *info = XCNEW (struct arch_process_info);
 
   return info;
+}
+
+/* This is the implementation of linux_target_ops method
+   delete_process.  */
+
+static void
+mips_linux_delete_process (struct arch_process_info *info)
+{
+  xfree (info);
 }
 
 /* This is the implementation of linux_target_ops method new_thread.
@@ -351,6 +338,14 @@ mips_linux_new_thread (struct lwp_info *lwp)
   info->watch_registers_changed = 1;
 
   lwp->arch_private = info;
+}
+
+/* Function to call when a thread is being deleted.  */
+
+static void
+mips_linux_delete_thread (struct arch_lwp_info *arch_lwp)
+{
+  xfree (arch_lwp);
 }
 
 /* Create a new mips_watchpoint and add it to the list.  */
@@ -468,7 +463,6 @@ mips_insert_point (enum raw_bkpt_type type, CORE_ADDR addr,
   struct process_info *proc = current_process ();
   struct arch_process_info *priv = proc->priv->arch_private;
   struct pt_watch_regs regs;
-  int pid;
   long lwpid;
   enum target_hw_bp_type watch_type;
   uint32_t irw;
@@ -499,8 +493,7 @@ mips_insert_point (enum raw_bkpt_type type, CORE_ADDR addr,
   priv->watch_mirror = regs;
 
   /* Only update the threads of this process.  */
-  pid = pid_of (proc);
-  find_inferior (&all_threads, update_watch_registers_callback, &pid);
+  for_each_thread (proc->pid, update_watch_registers_callback);
 
   return 0;
 }
@@ -516,7 +509,6 @@ mips_remove_point (enum raw_bkpt_type type, CORE_ADDR addr,
   struct arch_process_info *priv = proc->priv->arch_private;
 
   int deleted_one;
-  int pid;
   enum target_hw_bp_type watch_type;
 
   struct mips_watchpoint **pw;
@@ -550,8 +542,8 @@ mips_remove_point (enum raw_bkpt_type type, CORE_ADDR addr,
 				  &priv->watch_mirror);
 
   /* Only update the threads of this process.  */
-  pid = pid_of (proc);
-  find_inferior (&all_threads, update_watch_registers_callback, &pid);
+  for_each_thread (proc->pid, update_watch_registers_callback);
+
   return 0;
 }
 
@@ -649,7 +641,7 @@ mips_stopped_data_address (void)
 /* Fetch the thread-local storage pointer for libthread_db.  */
 
 ps_err_e
-ps_get_thread_area (const struct ps_prochandle *ph,
+ps_get_thread_area (struct ps_prochandle *ph,
 		    lwpid_t lwpid, int idx, void **base)
 {
   if (ptrace (PTRACE_GET_THREAD_AREA, lwpid, NULL, base) != 0)
@@ -892,7 +884,7 @@ struct linux_target_ops the_low_target = {
   mips_set_pc,
   NULL, /* breakpoint_kind_from_pc */
   mips_sw_breakpoint_from_kind,
-  mips_reinsert_addr,
+  NULL, /* get_next_pcs */
   0,
   mips_breakpoint_at,
   mips_supports_z_point_type,
@@ -904,7 +896,9 @@ struct linux_target_ops the_low_target = {
   NULL,
   NULL, /* siginfo_fixup */
   mips_linux_new_process,
+  mips_linux_delete_process,
   mips_linux_new_thread,
+  mips_linux_delete_thread,
   mips_linux_new_fork,
   mips_linux_prepare_to_resume
 };

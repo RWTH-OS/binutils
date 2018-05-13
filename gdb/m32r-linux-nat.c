@@ -1,6 +1,6 @@
 /* Native-dependent code for GNU/Linux m32r.
 
-   Copyright (C) 2004-2015 Free Software Foundation, Inc.
+   Copyright (C) 2004-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -26,6 +26,7 @@
 #include "nat/gdb_ptrace.h"
 #include <sys/user.h>
 #include <sys/procfs.h>
+#include "inf-ptrace.h"
 
 /* Prototypes for supply_gregset etc.  */
 #include "gregset.h"
@@ -194,12 +195,7 @@ static void
 m32r_linux_fetch_inferior_registers (struct target_ops *ops,
 				     struct regcache *regcache, int regno)
 {
-  int tid;
-
-  /* GNU/Linux LWP ID's are process ID's.  */
-  tid = ptid_get_lwp (inferior_ptid);
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid);	/* Not a threaded program.  */
+  pid_t tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   /* Use the PTRACE_GETREGS request whenever possible, since it
      transfers more registers in one system call, and we'll cache the
@@ -221,11 +217,7 @@ static void
 m32r_linux_store_inferior_registers (struct target_ops *ops,
 				     struct regcache *regcache, int regno)
 {
-  int tid;
-
-  /* GNU/Linux LWP ID's are process ID's.  */
-  if ((tid = ptid_get_lwp (inferior_ptid)) == 0)
-    tid = ptid_get_pid (inferior_ptid);	/* Not a threaded program.  */
+  pid_t tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   /* Use the PTRACE_SETREGS request whenever possible, since it
      transfers more registers in one system call.  */
@@ -238,8 +230,6 @@ m32r_linux_store_inferior_registers (struct target_ops *ops,
   internal_error (__FILE__, __LINE__,
 		  _("Got request to store bad register number %d."), regno);
 }
-
-void _initialize_m32r_linux_nat (void);
 
 void
 _initialize_m32r_linux_nat (void)

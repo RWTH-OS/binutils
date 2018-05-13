@@ -18,10 +18,12 @@ AC_SUBST(AR)
 AC_PROG_RANLIB
 
 # Put a plausible default for CC_FOR_BUILD in Makefile.
-if test "x$cross_compiling" = "xno"; then
-  CC_FOR_BUILD='$(CC)'
-else
-  CC_FOR_BUILD=gcc
+if test -z "$CC_FOR_BUILD"; then
+  if test "x$cross_compiling" = "xno"; then
+    CC_FOR_BUILD='$(CC)'
+  else
+    CC_FOR_BUILD=gcc
+  fi
 fi
 AC_SUBST(CC_FOR_BUILD)
 CFLAGS_FOR_BUILD=${CFLAGS_FOR_BUILD-${CFLAGS}}
@@ -43,9 +45,6 @@ m4_define([SIM_ARCH], [
 if test "${enable_sim}" != no; then
    sinclude(configure.tgt)
    AC_CONFIG_SUBDIRS(testsuite)
-   if test "$sim_common" = yes; then
-      AC_CONFIG_SUBDIRS(common)
-   fi
    if test "$sim_igen" = yes; then
       AC_CONFIG_SUBDIRS(igen)
    fi

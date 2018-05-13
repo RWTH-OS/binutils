@@ -1,5 +1,5 @@
 /* Simulator for the moxie processor
-   Copyright (C) 2008-2015 Free Software Foundation, Inc.
+   Copyright (C) 2008-2018 Free Software Foundation, Inc.
    Contributed by Anthony Green
 
 This file is part of GDB, the GNU debugger.
@@ -343,7 +343,7 @@ sim_engine_run (SIM_DESC sd,
 		default:
 		  {
 		    MOXIE_TRACE_INSN ("SIGILL3");
-		    sim_engine_halt (sd, NULL, NULL, pc, sim_stopped, SIM_SIGILL);
+		    sim_engine_halt (sd, scpu, NULL, pc, sim_stopped, SIM_SIGILL);
 		    break;
 		  }
 		}
@@ -394,7 +394,7 @@ sim_engine_run (SIM_DESC sd,
 		  break;
 		default:
 		  MOXIE_TRACE_INSN ("SIGILL2");
-		  sim_engine_halt (sd, NULL, NULL, pc, sim_stopped, SIM_SIGILL);
+		  sim_engine_halt (sd, scpu, NULL, pc, sim_stopped, SIM_SIGILL);
 		  break;
 		}
 	    }
@@ -408,7 +408,7 @@ sim_engine_run (SIM_DESC sd,
 	    case 0x00: /* bad */
 	      opc = opcode;
 	      MOXIE_TRACE_INSN ("SIGILL0");
-	      sim_engine_halt (sd, NULL, NULL, pc, sim_stopped, SIM_SIGILL);
+	      sim_engine_halt (sd, scpu, NULL, pc, sim_stopped, SIM_SIGILL);
 	      break;
 	    case 0x01: /* ldi.l (immediate) */
 	      {
@@ -666,7 +666,7 @@ sim_engine_run (SIM_DESC sd,
 	      {
 		opc = opcode;
 		MOXIE_TRACE_INSN ("SIGILL0");
-		sim_engine_halt (sd, NULL, NULL, pc, sim_stopped, SIM_SIGILL);
+		sim_engine_halt (sd, scpu, NULL, pc, sim_stopped, SIM_SIGILL);
 		break;
 	      }
 	    case 0x19: /* jsr */
@@ -933,7 +933,7 @@ sim_engine_run (SIM_DESC sd,
 		  {
 		  case 0x1: /* SYS_exit */
 		    {
-		      sim_engine_halt (sd, NULL, NULL, pc, sim_exited,
+		      sim_engine_halt (sd, scpu, NULL, pc, sim_exited,
 				       cpu.asregs.regs[2]);
 		      break;
 		    }
@@ -1046,7 +1046,7 @@ sim_engine_run (SIM_DESC sd,
 	      break;
 	    case 0x35: /* brk */
 	      MOXIE_TRACE_INSN ("brk");
-	      sim_engine_halt (sd, NULL, NULL, pc, sim_stopped, SIM_SIGTRAP);
+	      sim_engine_halt (sd, scpu, NULL, pc, sim_stopped, SIM_SIGTRAP);
 	      pc -= 2; /* Adjust pc */
 	      break;
 	    case 0x36: /* ldo.b */
@@ -1100,7 +1100,7 @@ sim_engine_run (SIM_DESC sd,
 	    default:
 	      opc = opcode;
 	      MOXIE_TRACE_INSN ("SIGILL1");
-	      sim_engine_halt (sd, NULL, NULL, pc, sim_stopped, SIM_SIGILL);
+	      sim_engine_halt (sd, scpu, NULL, pc, sim_stopped, SIM_SIGILL);
 	      break;
 	    }
 	}
@@ -1108,11 +1108,15 @@ sim_engine_run (SIM_DESC sd,
       cpu.asregs.insts++;
       pc += 2;
       cpu.asregs.regs[PC_REGNO] = pc;
+
+      if (sim_events_tick (sd))
+	sim_events_process (sd);
+
     } while (1);
 }
 
-int
-sim_store_register (SIM_DESC sd, int rn, unsigned char *memory, int length)
+static int
+moxie_reg_store (SIM_CPU *scpu, int rn, unsigned char *memory, int length)
 {
   if (rn < NUM_MOXIE_REGS && rn >= 0)
     {
@@ -1131,8 +1135,8 @@ sim_store_register (SIM_DESC sd, int rn, unsigned char *memory, int length)
     return 0;
 }
 
-int
-sim_fetch_register (SIM_DESC sd, int rn, unsigned char *memory, int length)
+static int
+moxie_reg_fetch (SIM_CPU *scpu, int rn, unsigned char *memory, int length)
 {
   if (rn < NUM_MOXIE_REGS && rn >= 0)
     {
@@ -1172,7 +1176,8 @@ free_state (SIM_DESC sd)
 }
 
 SIM_DESC
-sim_open (SIM_OPEN_KIND kind, host_callback *cb, struct bfd *abfd, char **argv)
+sim_open (SIM_OPEN_KIND kind, host_callback *cb,
+	  struct bfd *abfd, char * const *argv)
 {
   int i;
   SIM_DESC sd = sim_state_alloc (kind, cb);
@@ -1194,9 +1199,7 @@ sim_open (SIM_OPEN_KIND kind, host_callback *cb, struct bfd *abfd, char **argv)
       return 0;
     }
 
-  /* getopt will print the error message so we just have to exit if this fails.
-     FIXME: Hmmm...  in the case of gdb we need getopt to call
-     print_filtered.  */
+  /* The parser will print an error message for us, so we silently return.  */
   if (sim_parse_args (sd, argv) != SIM_RC_OK)
     {
       free_state (sd);
@@ -1237,6 +1240,8 @@ sim_open (SIM_OPEN_KIND kind, host_callback *cb, struct bfd *abfd, char **argv)
     {
       SIM_CPU *cpu = STATE_CPU (sd, i);
 
+      CPU_REG_FETCH (cpu) = moxie_reg_fetch;
+      CPU_REG_STORE (cpu) = moxie_reg_store;
       CPU_PC_FETCH (cpu) = moxie_pc_get;
       CPU_PC_STORE (cpu) = moxie_pc_set;
 
@@ -1245,13 +1250,6 @@ sim_open (SIM_OPEN_KIND kind, host_callback *cb, struct bfd *abfd, char **argv)
 
   return sd;
 }
-
-void
-sim_close (SIM_DESC sd, int quitting)
-{
-  /* nothing to do */
-}
-
 
 /* Load the device tree blob.  */
 
@@ -1282,7 +1280,8 @@ load_dtb (SIM_DESC sd, const char *filename)
 }
 
 SIM_RC
-sim_create_inferior (SIM_DESC sd, struct bfd *prog_bfd, char **argv, char **env)
+sim_create_inferior (SIM_DESC sd, struct bfd *prog_bfd,
+		     char * const *argv, char * const *env)
 {
   char ** avp;
   int l, argc, i, tp;

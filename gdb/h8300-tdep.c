@@ -1,6 +1,6 @@
 /* Target-machine dependent code for Renesas H8/300, for GDB.
 
-   Copyright (C) 1988-2015 Free Software Foundation, Inc.
+   Copyright (C) 1988-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -236,8 +236,6 @@ h8300_is_argument_spill (struct gdbarch *gdbarch, CORE_ADDR pc)
 	}
       else if (IS_MOVL_EXT (w2))
 	{
-	  int w3 = read_memory_integer (pc + 4, 2, byte_order);
-
 	  if (IS_MOVL_Rn24_SP (read_memory_integer (pc + 4, 2, byte_order)))
 	    {
 	      LONGEST disp = read_memory_integer (pc + 6, 4, byte_order);
@@ -664,18 +662,17 @@ h8300_push_dummy_call (struct gdbarch *gdbarch, struct value *function,
 
   for (argument = 0; argument < nargs; argument++)
     {
-      struct cleanup *back_to;
       struct type *type = value_type (args[argument]);
       int len = TYPE_LENGTH (type);
       char *contents = (char *) value_contents (args[argument]);
 
       /* Pad the argument appropriately.  */
       int padded_len = align_up (len, wordsize);
-      gdb_byte *padded = (gdb_byte *) xmalloc (padded_len);
-      back_to = make_cleanup (xfree, padded);
+      /* Use std::vector here to get zero initialization.  */
+      std::vector<gdb_byte> padded (padded_len);
 
-      memset (padded, 0, padded_len);
-      memcpy (len < wordsize ? padded + padded_len - len : padded,
+      memcpy ((len < wordsize ? padded.data () + padded_len - len
+	       : padded.data ()),
 	      contents, len);
 
       /* Could the argument fit in the remaining registers?  */
@@ -686,7 +683,7 @@ h8300_push_dummy_call (struct gdbarch *gdbarch, struct value *function,
 	  if (len > wordsize && len % wordsize)
 	    {
 	      /* I feel so unclean.  */
-	      write_memory (sp + stack_offset, padded, padded_len);
+	      write_memory (sp + stack_offset, padded.data (), padded_len);
 	      stack_offset += padded_len;
 
 	      /* That's right --- even though we passed the argument
@@ -704,7 +701,7 @@ h8300_push_dummy_call (struct gdbarch *gdbarch, struct value *function,
 	      for (offset = 0; offset < padded_len; offset += wordsize)
 		{
 		  ULONGEST word
-		    = extract_unsigned_integer (padded + offset,
+		    = extract_unsigned_integer (&padded[offset],
 						wordsize, byte_order);
 		  regcache_cooked_write_unsigned (regcache, reg++, word);
 		}
@@ -713,15 +710,13 @@ h8300_push_dummy_call (struct gdbarch *gdbarch, struct value *function,
       else
 	{
 	  /* It doesn't fit in registers!  Onto the stack it goes.  */
-	  write_memory (sp + stack_offset, padded, padded_len);
+	  write_memory (sp + stack_offset, padded.data (), padded_len);
 	  stack_offset += padded_len;
 
 	  /* Once one argument has spilled onto the stack, all
 	     subsequent arguments go on the stack.  */
 	  reg = E_ARGLAST_REGNUM + 1;
 	}
-
-      do_cleanups (back_to);
     }
 
   /* Store return address.  */
@@ -744,7 +739,7 @@ static void
 h8300_extract_return_value (struct type *type, struct regcache *regcache,
 			    gdb_byte *valbuf)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
   int len = TYPE_LENGTH (type);
   ULONGEST c, addr;
@@ -781,7 +776,7 @@ static void
 h8300h_extract_return_value (struct type *type, struct regcache *regcache,
 			     gdb_byte *valbuf)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
   ULONGEST c;
 
@@ -846,7 +841,7 @@ static void
 h8300_store_return_value (struct type *type, struct regcache *regcache,
 			  const gdb_byte *valbuf)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
   ULONGEST val;
 
@@ -875,7 +870,7 @@ static void
 h8300h_store_return_value (struct type *type, struct regcache *regcache,
 			   const gdb_byte *valbuf)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
   ULONGEST val;
 
@@ -956,7 +951,7 @@ h8300_register_name (struct gdbarch *gdbarch, int regno)
 {
   /* The register names change depending on which h8300 processor
      type is selected.  */
-  static char *register_names[] = {
+  static const char *register_names[] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6",
     "sp", "", "pc", "cycles", "tick", "inst",
     "ccr",			/* pseudo register */
@@ -973,7 +968,7 @@ h8300_register_name (struct gdbarch *gdbarch, int regno)
 static const char *
 h8300s_register_name (struct gdbarch *gdbarch, int regno)
 {
-  static char *register_names[] = {
+  static const char *register_names[] = {
     "er0", "er1", "er2", "er3", "er4", "er5", "er6",
     "sp", "", "pc", "cycles", "", "tick", "inst",
     "mach", "macl",
@@ -991,7 +986,7 @@ h8300s_register_name (struct gdbarch *gdbarch, int regno)
 static const char *
 h8300sx_register_name (struct gdbarch *gdbarch, int regno)
 {
-  static char *register_names[] = {
+  static const char *register_names[] = {
     "er0", "er1", "er2", "er3", "er4", "er5", "er6",
     "sp", "", "pc", "cycles", "", "tick", "inst",
     "mach", "macl", "sbr", "vbr",
@@ -1053,7 +1048,7 @@ h8300_print_register (struct gdbarch *gdbarch, struct ui_file *file,
 	fprintf_filtered (file, "u> ");
       if ((C | Z) == 1)
 	fprintf_filtered (file, "u<= ");
-      if ((C == 0))
+      if (C == 0)
 	fprintf_filtered (file, "u>= ");
       if (C == 1)
 	fprintf_filtered (file, "u< ");
@@ -1244,30 +1239,19 @@ h8300s_dbg_reg_to_regnum (struct gdbarch *gdbarch, int regno)
   return regno;
 }
 
-static const unsigned char *
-h8300_breakpoint_from_pc (struct gdbarch *gdbarch, CORE_ADDR *pcptr,
-			  int *lenptr)
-{
-  /*static unsigned char breakpoint[] = { 0x7A, 0xFF }; *//* ??? */
-  static unsigned char breakpoint[] = { 0x01, 0x80 };	/* Sleep */
+/*static unsigned char breakpoint[] = { 0x7A, 0xFF }; *//* ??? */
+constexpr gdb_byte h8300_break_insn[] = { 0x01, 0x80 };	/* Sleep */
 
-  *lenptr = sizeof (breakpoint);
-  return breakpoint;
-}
+typedef BP_MANIPULATION (h8300_break_insn) h8300_breakpoint;
 
 static struct gdbarch *
 h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
 {
-  struct gdbarch_tdep *tdep = NULL;
   struct gdbarch *gdbarch;
 
   arches = gdbarch_list_lookup_by_info (arches, &info);
   if (arches != NULL)
     return arches->gdbarch;
-
-#if 0
-  tdep = XNEW (struct gdbarch_tdep);
-#endif
 
   if (info.bfd_arch_info->arch != bfd_arch_h8300)
     return NULL;
@@ -1288,7 +1272,6 @@ h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
       set_gdbarch_ptr_bit (gdbarch, 2 * TARGET_CHAR_BIT);
       set_gdbarch_addr_bit (gdbarch, 2 * TARGET_CHAR_BIT);
       set_gdbarch_return_value (gdbarch, h8300_return_value);
-      set_gdbarch_print_insn (gdbarch, print_insn_h8300);
       break;
     case bfd_mach_h8300h:
     case bfd_mach_h8300hn:
@@ -1309,7 +1292,6 @@ h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
 	  set_gdbarch_addr_bit (gdbarch, 2 * TARGET_CHAR_BIT);
 	}
       set_gdbarch_return_value (gdbarch, h8300h_return_value);
-      set_gdbarch_print_insn (gdbarch, print_insn_h8300h);
       break;
     case bfd_mach_h8300s:
     case bfd_mach_h8300sn:
@@ -1330,7 +1312,6 @@ h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
 	  set_gdbarch_addr_bit (gdbarch, 2 * TARGET_CHAR_BIT);
 	}
       set_gdbarch_return_value (gdbarch, h8300h_return_value);
-      set_gdbarch_print_insn (gdbarch, print_insn_h8300s);
       break;
     case bfd_mach_h8300sx:
     case bfd_mach_h8300sxn:
@@ -1351,7 +1332,6 @@ h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
 	  set_gdbarch_addr_bit (gdbarch, 2 * TARGET_CHAR_BIT);
 	}
       set_gdbarch_return_value (gdbarch, h8300h_return_value);
-      set_gdbarch_print_insn (gdbarch, print_insn_h8300s);
       break;
     }
 
@@ -1384,13 +1364,20 @@ h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
   /* Stack grows up.  */
   set_gdbarch_inner_than (gdbarch, core_addr_lessthan);
 
-  set_gdbarch_breakpoint_from_pc (gdbarch, h8300_breakpoint_from_pc);
+  set_gdbarch_breakpoint_kind_from_pc (gdbarch,
+				       h8300_breakpoint::kind_from_pc);
+  set_gdbarch_sw_breakpoint_from_kind (gdbarch,
+				       h8300_breakpoint::bp_from_kind);
   set_gdbarch_push_dummy_call (gdbarch, h8300_push_dummy_call);
 
   set_gdbarch_char_signed (gdbarch, 0);
   set_gdbarch_int_bit (gdbarch, 2 * TARGET_CHAR_BIT);
   set_gdbarch_long_bit (gdbarch, 4 * TARGET_CHAR_BIT);
   set_gdbarch_long_long_bit (gdbarch, 8 * TARGET_CHAR_BIT);
+
+  set_gdbarch_wchar_bit (gdbarch, 2 * TARGET_CHAR_BIT);
+  set_gdbarch_wchar_signed (gdbarch, 0);
+
   set_gdbarch_double_bit (gdbarch, 4 * TARGET_CHAR_BIT);
   set_gdbarch_double_format (gdbarch, floatformats_ieee_single);
   set_gdbarch_long_double_bit (gdbarch, 4 * TARGET_CHAR_BIT);
@@ -1405,8 +1392,6 @@ h8300_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)
   return gdbarch;
 
 }
-
-extern initialize_file_ftype _initialize_h8300_tdep; /* -Wmissing-prototypes */
 
 void
 _initialize_h8300_tdep (void)

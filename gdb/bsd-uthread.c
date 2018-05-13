@@ -1,6 +1,6 @@
 /* BSD user-level threads support.
 
-   Copyright (C) 2005-2015 Free Software Foundation, Inc.
+   Copyright (C) 2005-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -287,12 +287,18 @@ static void
 bsd_uthread_fetch_registers (struct target_ops *ops,
 			     struct regcache *regcache, int regnum)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct bsd_uthread_ops *uthread_ops
     = (struct bsd_uthread_ops *) gdbarch_data (gdbarch, bsd_uthread_data);
-  CORE_ADDR addr = ptid_get_tid (inferior_ptid);
+  ptid_t ptid = regcache_get_ptid (regcache);
+  CORE_ADDR addr = ptid_get_tid (ptid);
   struct target_ops *beneath = find_target_beneath (ops);
   CORE_ADDR active_addr;
+  scoped_restore save_inferior_ptid = make_scoped_restore (&inferior_ptid);
+
+  /* We are doing operations (e.g. reading memory) that rely on
+     inferior_ptid.  */
+  inferior_ptid = ptid;
 
   /* Always fetch the appropriate registers from the layer beneath.  */
   beneath->to_fetch_registers (beneath, regcache, regnum);
@@ -315,12 +321,18 @@ static void
 bsd_uthread_store_registers (struct target_ops *ops,
 			     struct regcache *regcache, int regnum)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct bsd_uthread_ops *uthread_ops
     = (struct bsd_uthread_ops *) gdbarch_data (gdbarch, bsd_uthread_data);
   struct target_ops *beneath = find_target_beneath (ops);
-  CORE_ADDR addr = ptid_get_tid (inferior_ptid);
+  ptid_t ptid = regcache_get_ptid (regcache);
+  CORE_ADDR addr = ptid_get_tid (ptid);
   CORE_ADDR active_addr;
+  scoped_restore save_inferior_ptid = make_scoped_restore (&inferior_ptid);
+
+  /* We are doing operations (e.g. reading memory) that rely on
+     inferior_ptid.  */
+  inferior_ptid = ptid;
 
   active_addr = bsd_uthread_read_memory_address (bsd_uthread_thread_run_addr);
   if (addr != 0 && addr != active_addr)
@@ -401,7 +413,7 @@ bsd_uthread_thread_alive (struct target_ops *ops, ptid_t ptid)
 {
   enum bfd_endian byte_order = gdbarch_byte_order (target_gdbarch ());
   struct target_ops *beneath = find_target_beneath (ops);
-  CORE_ADDR addr = ptid_get_tid (inferior_ptid);
+  CORE_ADDR addr = ptid_get_tid (ptid);
 
   if (addr != 0)
     {
@@ -448,7 +460,7 @@ bsd_uthread_update_thread_list (struct target_ops *ops)
 }
 
 /* Possible states a thread can be in.  */
-static char *bsd_uthread_state[] =
+static const char *bsd_uthread_state[] =
 {
   "RUNNING",
   "SIGTHREAD",
@@ -475,7 +487,7 @@ static char *bsd_uthread_state[] =
 /* Return a string describing th state of the thread specified by
    INFO.  */
 
-static char *
+static const char *
 bsd_uthread_extra_thread_info (struct target_ops *self,
 			       struct thread_info *info)
 {
@@ -495,7 +507,7 @@ bsd_uthread_extra_thread_info (struct target_ops *self,
   return NULL;
 }
 
-static char *
+static const char *
 bsd_uthread_pid_to_str (struct target_ops *ops, ptid_t ptid)
 {
   if (ptid_get_tid (ptid) != 0)
@@ -534,9 +546,6 @@ bsd_uthread_target (void)
 
   return t;
 }
-
-/* Provide a prototype to silence -Wmissing-prototypes.  */
-extern initialize_file_ftype _initialize_bsd_uthread;
 
 void
 _initialize_bsd_uthread (void)

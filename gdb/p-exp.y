@@ -1,5 +1,5 @@
 /* YACC parser for Pascal expressions, for GDB.
-   Copyright (C) 2000-2015 Free Software Foundation, Inc.
+   Copyright (C) 2000-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -58,65 +58,10 @@
 
 #define parse_type(ps) builtin_type (parse_gdbarch (ps))
 
-/* Remap normal yacc parser interface names (yyparse, yylex, yyerror, etc),
-   as well as gratuitiously global symbol names, so we can have multiple
-   yacc generated parsers in gdb.  Note that these are only the variables
-   produced by yacc.  If other parser generators (bison, byacc, etc) produce
-   additional global names that conflict at link time, then those parser
-   generators need to be fixed instead of adding those names to this list.  */
-
-#define	yymaxdepth pascal_maxdepth
-#define	yyparse	pascal_parse_internal
-#define	yylex	pascal_lex
-#define	yyerror	pascal_error
-#define	yylval	pascal_lval
-#define	yychar	pascal_char
-#define	yydebug	pascal_debug
-#define	yypact	pascal_pact
-#define	yyr1	pascal_r1
-#define	yyr2	pascal_r2
-#define	yydef	pascal_def
-#define	yychk	pascal_chk
-#define	yypgo	pascal_pgo
-#define	yyact	pascal_act
-#define	yyexca	pascal_exca
-#define yyerrflag pascal_errflag
-#define yynerrs	pascal_nerrs
-#define	yyps	pascal_ps
-#define	yypv	pascal_pv
-#define	yys	pascal_s
-#define	yy_yys	pascal_yys
-#define	yystate	pascal_state
-#define	yytmp	pascal_tmp
-#define	yyv	pascal_v
-#define	yy_yyv	pascal_yyv
-#define	yyval	pascal_val
-#define	yylloc	pascal_lloc
-#define yyreds	pascal_reds		/* With YYDEBUG defined */
-#define yytoks	pascal_toks		/* With YYDEBUG defined */
-#define yyname	pascal_name		/* With YYDEBUG defined */
-#define yyrule	pascal_rule		/* With YYDEBUG defined */
-#define yylhs	pascal_yylhs
-#define yylen	pascal_yylen
-#define yydefred pascal_yydefred
-#define yydgoto	pascal_yydgoto
-#define yysindex pascal_yysindex
-#define yyrindex pascal_yyrindex
-#define yygindex pascal_yygindex
-#define yytable	 pascal_yytable
-#define yycheck	 pascal_yycheck
-#define yyss	pascal_yyss
-#define yysslim	pascal_yysslim
-#define yyssp	pascal_yyssp
-#define yystacksize pascal_yystacksize
-#define yyvs	pascal_yyvs
-#define yyvsp	pascal_yyvsp
-
-#ifndef YYDEBUG
-#define	YYDEBUG 1		/* Default to yydebug support */
-#endif
-
-#define YYFPRINTF parser_fprintf
+/* Remap normal yacc parser interface names (yyparse, yylex, yyerror,
+   etc).  */
+#define GDB_YY_REMAP_PREFIX pascal_
+#include "yy-remap.h"
 
 /* The state of the parser, used internally when we are parsing the
    expression.  */
@@ -127,7 +72,7 @@ int yyparse (void);
 
 static int yylex (void);
 
-void yyerror (char *);
+void yyerror (const char *);
 
 static char *uptok (const char *, int);
 %}
@@ -144,7 +89,7 @@ static char *uptok (const char *, int);
       struct type *type;
     } typed_val_int;
     struct {
-      DOUBLEST dval;
+      gdb_byte val[16];
       struct type *type;
     } typed_val_float;
     struct symbol *sym;
@@ -566,11 +511,11 @@ exp	:	NAME_OR_INT
 
 
 exp	:	FLOAT
-			{ write_exp_elt_opcode (pstate, OP_DOUBLE);
+			{ write_exp_elt_opcode (pstate, OP_FLOAT);
 			  write_exp_elt_type (pstate, $1.type);
 			  current_type = $1.type;
-			  write_exp_elt_dblcst (pstate, $1.dval);
-			  write_exp_elt_opcode (pstate, OP_DOUBLE); }
+			  write_exp_elt_floatcst (pstate, $1.val);
+			  write_exp_elt_opcode (pstate, OP_FLOAT); }
 	;
 
 exp	:	variable
@@ -909,9 +854,30 @@ parse_number (struct parser_state *par_state,
 
   if (parsed_float)
     {
-      if (! parse_c_float (parse_gdbarch (par_state), p, len,
-			   &putithere->typed_val_float.dval,
-			   &putithere->typed_val_float.type))
+      /* Handle suffixes: 'f' for float, 'l' for long double.
+         FIXME: This appears to be an extension -- do we want this?  */
+      if (len >= 1 && tolower (p[len - 1]) == 'f')
+	{
+	  putithere->typed_val_float.type
+	    = parse_type (par_state)->builtin_float;
+	  len--;
+	}
+      else if (len >= 1 && tolower (p[len - 1]) == 'l')
+	{
+	  putithere->typed_val_float.type
+	    = parse_type (par_state)->builtin_long_double;
+	  len--;
+	}
+      /* Default type for floating-point literals is double.  */
+      else
+	{
+	  putithere->typed_val_float.type
+	    = parse_type (par_state)->builtin_double;
+	}
+
+      if (!parse_float (p, len,
+			putithere->typed_val_float.type,
+			putithere->typed_val_float.val))
 	return ERROR;
       return FLOAT;
     }
@@ -1102,7 +1068,7 @@ pop_current_type (void)
 
 struct token
 {
-  char *oper;
+  const char *oper;
   int token;
   enum exp_opcode opcode;
 };
@@ -1756,20 +1722,16 @@ yylex (void)
 int
 pascal_parse (struct parser_state *par_state)
 {
-  int result;
-  struct cleanup *c = make_cleanup_clear_parser_state (&pstate);
-
   /* Setting up the parser state.  */
+  scoped_restore pstate_restore = make_scoped_restore (&pstate);
   gdb_assert (par_state != NULL);
   pstate = par_state;
 
-  result = yyparse ();
-  do_cleanups (c);
-  return result;
+  return yyparse ();
 }
 
 void
-yyerror (char *msg)
+yyerror (const char *msg)
 {
   if (prev_lexptr)
     lexptr = prev_lexptr;

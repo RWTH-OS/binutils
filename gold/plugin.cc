@@ -1,6 +1,6 @@
 // plugin.cc -- plugin manager for gold      -*- C++ -*-
 
-// Copyright (C) 2008-2015 Free Software Foundation, Inc.
+// Copyright (C) 2008-2018 Free Software Foundation, Inc.
 // Written by Cary Coutant <ccoutant@google.com>.
 
 // This file is part of gold.
@@ -112,6 +112,9 @@ static enum ld_plugin_status
 get_symbols_v2(const void *handle, int nsyms, struct ld_plugin_symbol *syms);
 
 static enum ld_plugin_status
+get_symbols_v3(const void *handle, int nsyms, struct ld_plugin_symbol *syms);
+
+static enum ld_plugin_status
 add_input_file(const char *pathname);
 
 static enum ld_plugin_status
@@ -155,6 +158,18 @@ unique_segment_for_sections(const char* segment_name,
 			    uint64_t align,
 			    const struct ld_plugin_section *section_list,
 			    unsigned int num_sections);
+
+static enum ld_plugin_status
+get_input_section_alignment(const struct ld_plugin_section section,
+                            unsigned int* addralign);
+
+static enum ld_plugin_status
+get_input_section_size(const struct ld_plugin_section section,
+                       uint64_t* secsize);
+
+static enum ld_plugin_status
+register_new_input(ld_plugin_new_input_handler handler);
+
 };
 
 #endif // ENABLE_PLUGINS
@@ -199,7 +214,7 @@ Plugin::load()
   sscanf(ver, "%d.%d", &major, &minor);
 
   // Allocate and populate a transfer vector.
-  const int tv_fixed_size = 26;
+  const int tv_fixed_size = 30;
 
   int tv_size = this->args_.size() + tv_fixed_size;
   ld_plugin_tv* tv = new ld_plugin_tv[tv_size];
@@ -277,6 +292,10 @@ Plugin::load()
   tv[i].tv_u.tv_get_symbols = get_symbols_v2;
 
   ++i;
+  tv[i].tv_tag = LDPT_GET_SYMBOLS_V3;
+  tv[i].tv_u.tv_get_symbols = get_symbols_v3;
+
+  ++i;
   tv[i].tv_tag = LDPT_ADD_INPUT_FILE;
   tv[i].tv_u.tv_add_input_file = add_input_file;
 
@@ -322,6 +341,18 @@ Plugin::load()
   tv[i].tv_u.tv_unique_segment_for_sections = unique_segment_for_sections;
 
   ++i;
+  tv[i].tv_tag = LDPT_GET_INPUT_SECTION_ALIGNMENT;
+  tv[i].tv_u.tv_get_input_section_alignment = get_input_section_alignment;
+
+  ++i;
+  tv[i].tv_tag = LDPT_GET_INPUT_SECTION_SIZE;
+  tv[i].tv_u.tv_get_input_section_size = get_input_section_size;
+
+  ++i;
+  tv[i].tv_tag = LDPT_REGISTER_NEW_INPUT_HOOK;
+  tv[i].tv_u.tv_register_new_input = register_new_input;
+
+  ++i;
   tv[i].tv_tag = LDPT_NULL;
   tv[i].tv_u.tv_val = 0;
 
@@ -357,6 +388,15 @@ Plugin::all_symbols_read()
 {
   if (this->all_symbols_read_handler_ != NULL)
     (*this->all_symbols_read_handler_)();
+}
+
+// Call the new_input handler.
+
+inline void
+Plugin::new_input(struct ld_plugin_input_file* plugin_input_file)
+{
+  if (this->new_input_handler_ != NULL)
+    (*this->new_input_handler_)(plugin_input_file);
 }
 
 // Call the cleanup handler.
@@ -452,8 +492,6 @@ Plugin_manager::claim_file(Input_file* input_file, off_t offset,
 
   gold_assert(lock_initialized);
   Hold_lock hl(*this->lock_);
-  if (this->in_replacement_phase_)
-    return NULL;
 
   unsigned int handle = this->objects_.size();
   this->input_file_ = input_file;
@@ -470,19 +508,28 @@ Plugin_manager::claim_file(Input_file* input_file, off_t offset,
        this->current_ != this->plugins_.end();
        ++this->current_)
     {
-      if ((*this->current_)->claim_file(&this->plugin_input_file_))
+      // If we aren't yet in replacement phase, allow plugins to claim input
+      // files, otherwise notify the plugin of the new input file, if needed.
+      if (!this->in_replacement_phase_)
         {
-	  this->any_claimed_ = true;
-	  this->in_claim_file_handler_ = false;
+          if ((*this->current_)->claim_file(&this->plugin_input_file_))
+            {
+              this->any_claimed_ = true;
+              this->in_claim_file_handler_ = false;
 
-          if (this->objects_.size() > handle
-              && this->objects_[handle]->pluginobj() != NULL)
-            return this->objects_[handle]->pluginobj();
+              if (this->objects_.size() > handle
+                  && this->objects_[handle]->pluginobj() != NULL)
+                return this->objects_[handle]->pluginobj();
 
-          // If the plugin claimed the file but did not call the
-          // add_symbols callback, we need to create the Pluginobj now.
-          Pluginobj* obj = this->make_plugin_object(handle);
-          return obj;
+              // If the plugin claimed the file but did not call the
+              // add_symbols callback, we need to create the Pluginobj now.
+              Pluginobj* obj = this->make_plugin_object(handle);
+              return obj;
+            }
+        }
+      else
+        {
+          (*this->current_)->new_input(&this->plugin_input_file_);
         }
     }
 
@@ -906,7 +953,9 @@ is_visible_from_outside(Symbol* lsym)
 {
   if (lsym->in_dyn())
     return true;
-  if (parameters->options().export_dynamic() || parameters->options().shared())
+  if (parameters->options().export_dynamic() || parameters->options().shared()
+      || parameters->options().in_dynamic_list(lsym->name())
+      || parameters->options().is_export_dynamic_symbol(lsym->name()))
     return lsym->is_externally_visible();
   return false;
 }
@@ -937,7 +986,7 @@ Pluginobj::get_symbol_resolution_info(Symbol_table* symtab,
       gold_assert(this->symbols_.size() == 0);
       for (int i = 0; i < nsyms; i++)
         syms[i].resolution = LDPR_PREEMPTED_REG;
-      return LDPS_OK;
+      return version > 2 ? LDPS_NO_SYMS : LDPS_OK;
     }
 
   for (int i = 0; i < nsyms; i++)
@@ -1095,7 +1144,8 @@ Sized_pluginobj<size, big_endian>::do_add_symbols(Symbol_table* symtab,
         {
         case LDPK_DEF:
         case LDPK_WEAKDEF:
-          shndx = elfcpp::SHN_ABS;
+          // We use an arbitrary section number for a defined symbol.
+          shndx = 1;
           break;
         case LDPK_COMMON:
           shndx = elfcpp::SHN_COMMON;
@@ -1155,6 +1205,8 @@ Sized_pluginobj<size, big_endian>::do_should_include_member(
   for (int i = 0; i < this->nsyms_; ++i)
     {
       const struct ld_plugin_symbol& sym = this->syms_[i];
+      if (sym.def == LDPK_UNDEF || sym.def == LDPK_WEAKUNDEF)
+        continue;
       const char* name = sym.name;
       Symbol* symbol;
       Archive::Should_include t = Archive::should_include_member(symtab,
@@ -1545,6 +1597,26 @@ get_symbols_v2(const void* handle, int nsyms, ld_plugin_symbol* syms)
   return plugin_obj->get_symbol_resolution_info(symtab, nsyms, syms, 2);
 }
 
+// Version 3 of the above.  The only difference from v2 is that it
+// returns LDPS_NO_SYMS instead of LDPS_OK for the objects we never
+// decided to include.
+
+static enum ld_plugin_status
+get_symbols_v3(const void* handle, int nsyms, ld_plugin_symbol* syms)
+{
+  gold_assert(parameters->options().has_plugins());
+  Plugin_manager* plugins = parameters->options().plugins();
+  Object* obj = plugins->object(
+    static_cast<unsigned int>(reinterpret_cast<intptr_t>(handle)));
+  if (obj == NULL)
+    return LDPS_ERR;
+  Pluginobj* plugin_obj = obj->pluginobj();
+  if (plugin_obj == NULL)
+    return LDPS_ERR;
+  Symbol_table* symtab = plugins->symtab();
+  return plugin_obj->get_symbol_resolution_info(symtab, nsyms, syms, 3);
+}
+
 // Add a new (real) input file generated by a plugin.
 
 static enum ld_plugin_status
@@ -1703,6 +1775,53 @@ get_input_section_contents(const struct ld_plugin_section section,
   return LDPS_OK;
 }
 
+// Get the alignment of the specified section in the object corresponding
+// to the handle.  This plugin interface can only be called in the
+// claim_file handler of the plugin.
+
+static enum ld_plugin_status
+get_input_section_alignment(const struct ld_plugin_section section,
+                            unsigned int* addralign)
+{
+  gold_assert(parameters->options().has_plugins());
+
+  if (!parameters->options().plugins()->in_claim_file_handler())
+    return LDPS_ERR;
+
+  Object* obj
+    = parameters->options().plugins()->get_elf_object(section.handle);
+
+  if (obj == NULL)
+    return LDPS_BAD_HANDLE;
+
+  *addralign = obj->section_addralign(section.shndx);
+  return LDPS_OK;
+}
+
+// Get the size of the specified section in the object corresponding
+// to the handle.  This plugin interface can only be called in the
+// claim_file handler of the plugin.
+
+static enum ld_plugin_status
+get_input_section_size(const struct ld_plugin_section section,
+                       uint64_t* secsize)
+{
+  gold_assert(parameters->options().has_plugins());
+
+  if (!parameters->options().plugins()->in_claim_file_handler())
+    return LDPS_ERR;
+
+  Object* obj
+    = parameters->options().plugins()->get_elf_object(section.handle);
+
+  if (obj == NULL)
+    return LDPS_BAD_HANDLE;
+
+  *secsize = obj->section_size(section.shndx);
+  return LDPS_OK;
+}
+
+
 // Specify the ordering of sections in the final layout. The sections are
 // specified as (handle,shndx) pairs in the two arrays in the order in
 // which they should appear in the final layout.
@@ -1807,6 +1926,16 @@ unique_segment_for_sections(const char* segment_name,
       layout->insert_section_segment_map(secn_id, s);
     }
 
+  return LDPS_OK;
+}
+
+// Register a new_input handler.
+
+static enum ld_plugin_status
+register_new_input(ld_plugin_new_input_handler handler)
+{
+  gold_assert(parameters->options().has_plugins());
+  parameters->options().plugins()->set_new_input_handler(handler);
   return LDPS_OK;
 }
 

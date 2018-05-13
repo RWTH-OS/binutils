@@ -1,6 +1,6 @@
 /* CTF format support.
 
-   Copyright (C) 2012-2015 Free Software Foundation, Inc.
+   Copyright (C) 2012-2018 Free Software Foundation, Inc.
    Contributed by Hui Zhu <hui_zhu@mentor.com>
    Contributed by Yao Qi <yao@codesourcery.com>
 
@@ -29,8 +29,8 @@
 #include "inferior.h"
 #include "gdbthread.h"
 #include "tracefile.h"
-
 #include <ctype.h>
+#include <algorithm>
 
 /* GDB saves trace buffers and other information (such as trace
    status) got from the remote target into Common Trace Format (CTF).
@@ -202,27 +202,6 @@ ctf_save_next_packet (struct trace_write_handler *handler)
 static void
 ctf_save_metadata_header (struct trace_write_handler *handler)
 {
-  const char metadata_fmt[] =
-  "\ntrace {\n"
-  "	major = %u;\n"
-  "	minor = %u;\n"
-  "	byte_order = %s;\n"		/* be or le */
-  "	packet.header := struct {\n"
-  "		uint32_t magic;\n"
-  "	};\n"
-  "};\n"
-  "\n"
-  "stream {\n"
-  "	packet.context := struct {\n"
-  "		uint32_t content_size;\n"
-  "		uint32_t packet_size;\n"
-  "		uint16_t tpnum;\n"
-  "	};\n"
-  "	event.header := struct {\n"
-  "		uint32_t id;\n"
-  "	};\n"
-  "};\n";
-
   ctf_save_write_metadata (handler, "/* CTF %d.%d */\n",
 			   CTF_SAVE_MAJOR, CTF_SAVE_MINOR);
   ctf_save_write_metadata (handler,
@@ -262,7 +241,26 @@ ctf_save_metadata_header (struct trace_write_handler *handler)
 #define HOST_ENDIANNESS "le"
 #endif
 
-  ctf_save_write_metadata (handler, metadata_fmt,
+  ctf_save_write_metadata (handler,
+			   "\ntrace {\n"
+			   "	major = %u;\n"
+			   "	minor = %u;\n"
+			   "	byte_order = %s;\n"
+			   "	packet.header := struct {\n"
+			   "		uint32_t magic;\n"
+			   "	};\n"
+			   "};\n"
+			   "\n"
+			   "stream {\n"
+			   "	packet.context := struct {\n"
+			   "		uint32_t content_size;\n"
+			   "		uint32_t packet_size;\n"
+			   "		uint16_t tpnum;\n"
+			   "	};\n"
+			   "	event.header := struct {\n"
+			   "		uint32_t id;\n"
+			   "	};\n"
+			   "};\n",
 			   CTF_SAVE_MAJOR, CTF_SAVE_MINOR,
 			   HOST_ENDIANNESS);
   ctf_save_write_metadata (handler, "\n");
@@ -306,11 +304,6 @@ ctf_target_save (struct trace_file_writer *self,
   return 0;
 }
 
-#ifdef USE_WIN32API
-#undef mkdir
-#define mkdir(pathname, mode) mkdir (pathname)
-#endif
-
 /* This is the implementation of trace_file_write_ops method
    start.  It creates the directory DIRNAME, metadata and datastream
    in the directory.  */
@@ -318,11 +311,8 @@ ctf_target_save (struct trace_file_writer *self,
 static void
 ctf_start (struct trace_file_writer *self, const char *dirname)
 {
-  char *file_name;
-  struct cleanup *old_chain;
   struct ctf_trace_file_writer *writer
     = (struct ctf_trace_file_writer *) self;
-  int i;
   mode_t hmode = S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH;
 
   /* Create DIRNAME.  */
@@ -332,24 +322,20 @@ ctf_start (struct trace_file_writer *self, const char *dirname)
 
   memset (&writer->tcs, '\0', sizeof (writer->tcs));
 
-  file_name = xstrprintf ("%s/%s", dirname, CTF_METADATA_NAME);
-  old_chain = make_cleanup (xfree, file_name);
+  std::string file_name = string_printf ("%s/%s", dirname, CTF_METADATA_NAME);
 
-  writer->tcs.metadata_fd = fopen (file_name, "w");
+  writer->tcs.metadata_fd = fopen (file_name.c_str (), "w");
   if (writer->tcs.metadata_fd == NULL)
     error (_("Unable to open file '%s' for saving trace data (%s)"),
-	   file_name, safe_strerror (errno));
-  do_cleanups (old_chain);
+	   file_name.c_str (), safe_strerror (errno));
 
   ctf_save_metadata_header (&writer->tcs);
 
-  file_name = xstrprintf ("%s/%s", dirname, CTF_DATASTREAM_NAME);
-  old_chain = make_cleanup (xfree, file_name);
-  writer->tcs.datastream_fd = fopen (file_name, "w");
+  file_name = string_printf ("%s/%s", dirname, CTF_DATASTREAM_NAME);
+  writer->tcs.datastream_fd = fopen (file_name.c_str (), "w");
   if (writer->tcs.datastream_fd == NULL)
     error (_("Unable to open file '%s' for saving trace data (%s)"),
-	   file_name, safe_strerror (errno));
-  do_cleanups (old_chain);
+	   file_name.c_str (), safe_strerror (errno));
 }
 
 /* This is the implementation of trace_file_write_ops method
@@ -466,7 +452,6 @@ ctf_write_status (struct trace_file_writer *self,
   struct ctf_trace_file_writer *writer
     = (struct ctf_trace_file_writer *) self;
   uint32_t id;
-  int32_t int32;
 
   ctf_save_write_metadata (&writer->tcs, "\n");
   ctf_save_write_metadata (&writer->tcs,
@@ -509,7 +494,6 @@ ctf_write_uploaded_tsv (struct trace_file_writer *self,
     = (struct ctf_trace_file_writer *) self;
   int32_t int32;
   int64_t int64;
-  unsigned int len;
   const gdb_byte zero = 0;
 
   /* Event Id.  */
@@ -617,14 +601,20 @@ ctf_write_uploaded_tp (struct trace_file_writer *self,
 }
 
 /* This is the implementation of trace_file_write_ops method
+   write_tdesc.  */
+
+static void
+ctf_write_tdesc (struct trace_file_writer *self)
+{
+  /* Nothing so far. */
+}
+
+/* This is the implementation of trace_file_write_ops method
    write_definition_end.  */
 
 static void
 ctf_write_definition_end (struct trace_file_writer *self)
 {
-  struct ctf_trace_file_writer *writer
-    = (struct ctf_trace_file_writer *) self;
-
   self->ops->frame_ops->end (self);
 }
 
@@ -799,6 +789,7 @@ static const struct trace_file_write_ops ctf_write_ops =
   ctf_write_status,
   ctf_write_uploaded_tsv,
   ctf_write_uploaded_tp,
+  ctf_write_tdesc,
   ctf_write_definition_end,
   NULL,
   &ctf_write_frame_ops,
@@ -862,7 +853,6 @@ static void
 ctf_open_dir (const char *dirname)
 {
   struct bt_iter_pos begin_pos;
-  struct bt_iter_pos *pos;
   unsigned int count, i;
   struct bt_ctf_event_decl * const *list;
 
@@ -892,7 +882,6 @@ ctf_open_dir (const char *dirname)
   for (i = 0; i < count; i++)
     if (strcmp ("register", bt_ctf_get_decl_event_name (list[i])) == 0)
       {
-	unsigned int j;
 	const struct bt_ctf_field_decl * const *field_list;
 	const struct bt_declaration *decl;
 
@@ -1189,7 +1178,7 @@ static void
 ctf_fetch_registers (struct target_ops *ops,
 		     struct regcache *regcache, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct bt_ctf_event *event = NULL;
   struct bt_iter_pos *pos;
 
@@ -1287,7 +1276,6 @@ ctf_xfer_partial (struct target_ops *ops, enum target_object object,
   if (get_traceframe_number () != -1)
     {
       struct bt_iter_pos *pos;
-      int i = 0;
       enum target_xfer_status res;
       /* Records the lowest available address of all blocks that
 	 intersects the requested range.  */
@@ -1305,8 +1293,6 @@ ctf_xfer_partial (struct target_ops *ops, enum target_object object,
 	  ULONGEST amt;
 	  uint64_t maddr;
 	  uint16_t mlen;
-	  enum bfd_endian byte_order
-	    = gdbarch_byte_order (target_gdbarch ());
 	  const struct bt_definition *scope;
 	  const struct bt_definition *def;
 	  struct bt_ctf_event *event
@@ -1339,8 +1325,6 @@ ctf_xfer_partial (struct target_ops *ops, enum target_object object,
 	    {
 	      const struct bt_definition *array
 		= bt_ctf_get_field (event, scope, "contents");
-	      const struct bt_declaration *decl
-		= bt_ctf_get_decl_from_def (array);
 	      gdb_byte *contents;
 	      int k;
 
@@ -1389,7 +1373,7 @@ ctf_xfer_partial (struct target_ops *ops, enum target_object object,
 	 and this address falls within a read-only section, fallback
 	 to reading from executable, up to LOW_ADDR_AVAILABLE  */
       if (offset < low_addr_available)
-	len = min (len, low_addr_available - offset);
+	len = std::min (len, low_addr_available - offset);
       res = exec_read_partial_read_only (readbuf, offset, len, xfered_len);
 
       if (res == TARGET_XFER_OK)
@@ -1519,8 +1503,8 @@ ctf_get_traceframe_address (void)
       struct tracepoint *tp
 	= get_tracepoint_by_number_on_target (tpnum);
 
-      if (tp && tp->base.loc)
-	addr = tp->base.loc->address;
+      if (tp && tp->loc)
+	addr = tp->loc->address;
     }
 
   /* Restore the position.  */
@@ -1537,10 +1521,8 @@ static int
 ctf_trace_find (struct target_ops *self, enum trace_find_type type, int num,
 		CORE_ADDR addr1, CORE_ADDR addr2, int *tpp)
 {
-  int ret = -1;
   int tfnum = 0;
   int found = 0;
-  struct bt_iter_pos pos;
 
   if (num == -1)
     {
@@ -1555,7 +1537,6 @@ ctf_trace_find (struct target_ops *self, enum trace_find_type type, int num,
 
   while (1)
     {
-      int id;
       struct bt_ctf_event *event;
       const char *name;
 
@@ -1638,10 +1619,10 @@ ctf_trace_find (struct target_ops *self, enum trace_find_type type, int num,
    frame, extract memory range information, and return them in
    traceframe_info.  */
 
-static struct traceframe_info *
+static traceframe_info_up
 ctf_traceframe_info (struct target_ops *self)
 {
-  struct traceframe_info *info = XCNEW (struct traceframe_info);
+  traceframe_info_up info (new traceframe_info);
   const char *name;
   struct bt_iter_pos *pos;
 
@@ -1666,14 +1647,14 @@ ctf_traceframe_info (struct target_ops *self)
 	    = bt_ctf_get_top_level_scope (event,
 					  BT_EVENT_FIELDS);
 	  const struct bt_definition *def;
-	  struct mem_range *r;
 
-	  r = VEC_safe_push (mem_range_s, info->memory, NULL);
 	  def = bt_ctf_get_field (event, scope, "address");
-	  r->start = bt_ctf_get_uint64 (def);
+	  CORE_ADDR start = bt_ctf_get_uint64 (def);
 
 	  def = bt_ctf_get_field (event, scope, "length");
-	  r->length = (uint16_t) bt_ctf_get_uint64 (def);
+	  int length = (uint16_t) bt_ctf_get_uint64 (def);
+
+	  info->memory.emplace_back (start, length);
 	}
       else if (strcmp (name, "tsv") == 0)
 	{
@@ -1684,8 +1665,8 @@ ctf_traceframe_info (struct target_ops *self)
 	  const struct bt_definition *def;
 
 	  def = bt_ctf_get_field (event, scope, "num");
-	  vnum = (int) bt_ctf_get_int64 (def);
-	  VEC_safe_push (int, info->tvars, vnum);
+	  vnum = (int) bt_ctf_get_uint64 (def);
+	  info->tvars.push_back (vnum);
 	}
       else
 	{
@@ -1727,10 +1708,6 @@ Specify the filename of the CTF directory.";
 }
 
 #endif
-
-/* -Wmissing-prototypes */
-
-extern initialize_file_ftype _initialize_ctf;
 
 /* module initialization */
 

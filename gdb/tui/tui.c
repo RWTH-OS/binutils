@@ -1,6 +1,6 @@
 /* General functions for the WDB TUI.
 
-   Copyright (C) 1998-2015 Free Software Foundation, Inc.
+   Copyright (C) 1998-2018 Free Software Foundation, Inc.
 
    Contributed by Hewlett-Packard Company.
 
@@ -38,6 +38,7 @@
 #include "symtab.h"
 #include "source.h"
 #include "terminal.h"
+#include "top.h"
 
 #include <ctype.h>
 #include <signal.h>
@@ -74,8 +75,10 @@ static const struct tui_char_command tui_commands[] = {
   { 'd', "down" },
   { 'f', "finish" },
   { 'n', "next" },
+  { 'o', "nexti" },
   { 'r', "run" },
   { 's', "step" },
+  { 'i', "stepi" },
   { 'u', "up" },
   { 'v', "info locals" },
   { 'w', "where" },
@@ -302,7 +305,8 @@ static int
 tui_rl_startup_hook (void)
 {
   rl_already_prompted = 1;
-  if (tui_current_key_mode != TUI_COMMAND_MODE && immediate_quit == 0)
+  if (tui_current_key_mode != TUI_COMMAND_MODE
+      && !gdb_in_secondary_prompt_p (current_ui))
     tui_set_key_mode (TUI_SINGLE_KEY_MODE);
   tui_redisplay_readline ();
   return 0;
@@ -396,8 +400,6 @@ gdb_getenv_term (void)
 void
 tui_enable (void)
 {
-  struct interp *interp;
-
   if (tui_active)
     return;
 
@@ -427,7 +429,7 @@ tui_enable (void)
       /* The MinGW port of ncurses requires $TERM to be unset in order
 	 to activate the Windows console driver.  */
       if (s == NULL)
-	s = newterm ("unknown", stdout, stdin);
+	s = newterm ((char *) "unknown", stdout, stdin);
 #endif
       if (s == NULL)
 	{
@@ -439,7 +441,7 @@ tui_enable (void)
       /* Check required terminal capabilities.  The MinGW port of
 	 ncurses does have them, but doesn't expose them through "cup".  */
 #ifndef __MINGW32__
-      cap = tigetstr ("cup");
+      cap = tigetstr ((char *) "cup");
       if (cap == NULL || cap == (char *) -1 || *cap == '\0')
 	{
 	  endwin ();
@@ -543,7 +545,7 @@ tui_disable (void)
 /* Command wrapper for enabling tui mode.  */
 
 static void
-tui_enable_command (char *args, int from_tty)
+tui_enable_command (const char *args, int from_tty)
 {
   tui_enable ();
 }
@@ -551,7 +553,7 @@ tui_enable_command (char *args, int from_tty)
 /* Command wrapper for leaving tui mode.  */
 
 static void
-tui_disable_command (char *args, int from_tty)
+tui_disable_command (const char *args, int from_tty)
 {
   tui_disable ();
 }
@@ -668,9 +670,6 @@ tui_get_command_dimension (unsigned int *width,
   *height = TUI_CMD_WIN->generic.height;
   return 1;
 }
-
-/* Provide a prototype to silence -Wmissing-prototypes.  */
-extern initialize_file_ftype _initialize_tui;
 
 void
 _initialize_tui (void)

@@ -1,6 +1,6 @@
 /* Shared general utility routines for GDB, the GNU debugger.
 
-   Copyright (C) 1986-2015 Free Software Foundation, Inc.
+   Copyright (C) 1986-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -18,6 +18,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
 #include "common-defs.h"
+#include "common-utils.h"
 #include "host-defs.h"
 #include <ctype.h>
 
@@ -94,10 +95,9 @@ xzalloc (size_t size)
 }
 
 void
-xfree (void *ptr)
+xmalloc_failed (size_t size)
 {
-  if (ptr != NULL)
-    free (ptr);		/* ARI: free */
+  malloc_failure (size);
 }
 
 /* Like asprintf/vasprintf but get an internal_error if the call
@@ -142,6 +142,84 @@ xsnprintf (char *str, size_t size, const char *format, ...)
   va_end (args);
 
   return ret;
+}
+
+/* See documentation in common-utils.h.  */
+
+std::string
+string_printf (const char* fmt, ...)
+{
+  va_list vp;
+  int size;
+
+  va_start (vp, fmt);
+  size = vsnprintf (NULL, 0, fmt, vp);
+  va_end (vp);
+
+  std::string str (size, '\0');
+
+  /* C++11 and later guarantee std::string uses contiguous memory and
+     always includes the terminating '\0'.  */
+  va_start (vp, fmt);
+  vsprintf (&str[0], fmt, vp);
+  va_end (vp);
+
+  return str;
+}
+
+/* See documentation in common-utils.h.  */
+
+std::string
+string_vprintf (const char* fmt, va_list args)
+{
+  va_list vp;
+  size_t size;
+
+  va_copy (vp, args);
+  size = vsnprintf (NULL, 0, fmt, vp);
+  va_end (vp);
+
+  std::string str (size, '\0');
+
+  /* C++11 and later guarantee std::string uses contiguous memory and
+     always includes the terminating '\0'.  */
+  vsprintf (&str[0], fmt, args);
+
+  return str;
+}
+
+
+/* See documentation in common-utils.h.  */
+
+void
+string_appendf (std::string &str, const char *fmt, ...)
+{
+  va_list vp;
+
+  va_start (vp, fmt);
+  string_vappendf (str, fmt, vp);
+  va_end (vp);
+}
+
+
+/* See documentation in common-utils.h.  */
+
+void
+string_vappendf (std::string &str, const char *fmt, va_list args)
+{
+  va_list vp;
+  int grow_size;
+
+  va_copy (vp, args);
+  grow_size = vsnprintf (NULL, 0, fmt, vp);
+  va_end (vp);
+
+  size_t curr_size = str.size ();
+  str.resize (curr_size + grow_size);
+
+  /* C++11 and later guarantee std::string uses contiguous memory and
+     always includes the terminating '\0'.  */
+  vsprintf (&str[curr_size], fmt, args);
 }
 
 char *
@@ -253,7 +331,7 @@ strtoulst (const char *num, const char **trailer, int base)
     return result;
 }
 
-/* See documentation in cli-utils.h.  */
+/* See documentation in common-utils.h.  */
 
 char *
 skip_spaces (char *chp)
@@ -268,7 +346,7 @@ skip_spaces (char *chp)
 /* A const-correct version of the above.  */
 
 const char *
-skip_spaces_const (const char *chp)
+skip_spaces (const char *chp)
 {
   if (chp == NULL)
     return NULL;
@@ -277,14 +355,56 @@ skip_spaces_const (const char *chp)
   return chp;
 }
 
-/* See documentation in cli-utils.h.  */
+/* See documentation in common-utils.h.  */
 
 const char *
-skip_to_space_const (const char *chp)
+skip_to_space (const char *chp)
 {
   if (chp == NULL)
     return NULL;
   while (*chp && !isspace (*chp))
     chp++;
   return chp;
+}
+
+/* See documentation in common-utils.h.  */
+
+char *
+skip_to_space (char *chp)
+{
+  return (char *) skip_to_space ((const char *) chp);
+}
+
+/* See common/common-utils.h.  */
+
+void
+free_vector_argv (std::vector<char *> &v)
+{
+  for (char *el : v)
+    xfree (el);
+
+  v.clear ();
+}
+
+/* See common/common-utils.h.  */
+
+std::string
+stringify_argv (const std::vector<char *> &args)
+{
+  std::string ret;
+
+  if (!args.empty () && args[0] != NULL)
+    {
+      for (auto s : args)
+	if (s != NULL)
+	  {
+	    ret += s;
+	    ret += ' ';
+	  }
+
+      /* Erase the last whitespace.  */
+      ret.erase (ret.end () - 1);
+    }
+
+  return ret;
 }

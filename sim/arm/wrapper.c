@@ -1,5 +1,5 @@
 /* run front end support for arm
-   Copyright (C) 1995-2015 Free Software Foundation, Inc.
+   Copyright (C) 1995-2018 Free Software Foundation, Inc.
 
    This file is part of ARM SIM.
 
@@ -92,10 +92,12 @@ void
 print_insn (ARMword instr)
 {
   int size;
+  disassembler_ftype disassemble_fn;
 
   opbuf[0] = 0;
   info.application_data = & instr;
-  size = print_insn_little_arm (0, & info);
+  disassemble_fn = disassembler (bfd_arch_arm, 0, 0, NULL);
+  size = disassemble_fn (0, & info);
   fprintf (stderr, " %*s\n", size, opbuf);
 }
 
@@ -140,7 +142,7 @@ init (void)
     {
       ARMul_EmulateInit ();
       state = ARMul_NewState ();
-      state->bigendSig = (CURRENT_TARGET_BYTE_ORDER == BIG_ENDIAN ? HIGH : LOW);
+      state->bigendSig = (CURRENT_TARGET_BYTE_ORDER == BFD_ENDIAN_BIG ? HIGH : LOW);
       ARMul_MemoryInit (state, mem_size);
       ARMul_OSInit (state);
       state->verbose = 0;
@@ -161,14 +163,6 @@ ARMul_ConsolePrint (ARMul_State * state,
       vprintf (format, ap);
       va_end (ap);
     }
-}
-
-ARMword
-ARMul_Debug (ARMul_State * state ATTRIBUTE_UNUSED,
-	     ARMword       pc    ATTRIBUTE_UNUSED,
-	     ARMword       instr ATTRIBUTE_UNUSED)
-{
-  return 0;
 }
 
 int
@@ -237,8 +231,8 @@ sim_resume (SIM_DESC sd ATTRIBUTE_UNUSED,
 SIM_RC
 sim_create_inferior (SIM_DESC sd ATTRIBUTE_UNUSED,
 		     struct bfd * abfd,
-		     char ** argv,
-		     char ** env)
+		     char * const *argv,
+		     char * const *env)
 {
   int argvlen = 0;
   int mach;
@@ -439,11 +433,8 @@ tomem (struct ARMul_State *state,
     }
 }
 
-int
-sim_store_register (SIM_DESC sd ATTRIBUTE_UNUSED,
-		    int rn,
-		    unsigned char *memory,
-		    int length)
+static int
+arm_reg_store (SIM_CPU *cpu, int rn, unsigned char *memory, int length)
 {
   init ();
 
@@ -547,11 +538,8 @@ sim_store_register (SIM_DESC sd ATTRIBUTE_UNUSED,
   return length;
 }
 
-int
-sim_fetch_register (SIM_DESC sd ATTRIBUTE_UNUSED,
-		    int rn,
-		    unsigned char *memory,
-		    int length)
+static int
+arm_reg_fetch (SIM_CPU *cpu, int rn, unsigned char *memory, int length)
 {
   ARMword regval;
   int len = length;
@@ -754,7 +742,7 @@ sim_target_parse_command_line (int argc, char ** argv)
 	{
 	  int i;
 
-	  for (i = sizeof options / sizeof options[0]; i--;)
+	  for (i = ARRAY_SIZE (options); i--;)
 	    if (strncmp (ptr, options[i].swi_option,
 			 strlen (options[i].swi_option)) == 0)
 	      {
@@ -786,12 +774,7 @@ sim_target_parse_command_line (int argc, char ** argv)
 static void
 sim_target_parse_arg_array (char ** argv)
 {
-  int i;
-
-  for (i = 0; argv[i]; i++)
-    ;
-
-  sim_target_parse_command_line (i, argv);
+  sim_target_parse_command_line (countargv (argv), argv);
 }
 
 static sim_cia
@@ -819,7 +802,7 @@ SIM_DESC
 sim_open (SIM_OPEN_KIND kind,
 	  host_callback *cb,
 	  struct bfd *abfd,
-	  char **argv)
+	  char * const *argv)
 {
   int i;
   SIM_DESC sd = sim_state_alloc (kind, cb);
@@ -838,9 +821,7 @@ sim_open (SIM_OPEN_KIND kind,
       return 0;
     }
 
-  /* getopt will print the error message so we just have to exit if this fails.
-     FIXME: Hmmm...  in the case of gdb we need getopt to call
-     print_filtered.  */
+  /* The parser will print an error message for us, so we silently return.  */
   if (sim_parse_args (sd, argv) != SIM_RC_OK)
     {
       free_state (sd);
@@ -878,6 +859,8 @@ sim_open (SIM_OPEN_KIND kind,
     {
       SIM_CPU *cpu = STATE_CPU (sd, i);
 
+      CPU_REG_FETCH (cpu) = arm_reg_fetch;
+      CPU_REG_STORE (cpu) = arm_reg_store;
       CPU_PC_FETCH (cpu) = arm_pc_get;
       CPU_PC_STORE (cpu) = arm_pc_set;
     }
@@ -911,13 +894,6 @@ sim_open (SIM_OPEN_KIND kind,
     }
 
   return sd;
-}
-
-void
-sim_close (SIM_DESC sd ATTRIBUTE_UNUSED,
-	   int quitting ATTRIBUTE_UNUSED)
-{
-  /* Nothing to do.  */
 }
 
 void

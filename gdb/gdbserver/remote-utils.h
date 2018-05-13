@@ -1,5 +1,5 @@
 /* Remote utility routines for the remote server for GDB.
-   Copyright (C) 1993-2015 Free Software Foundation, Inc.
+   Copyright (C) 1993-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -28,15 +28,15 @@ int gdb_connected (void);
 #define STDIO_CONNECTION_NAME "stdio"
 int remote_connection_is_stdio (void);
 
-ptid_t read_ptid (char *buf, char **obuf);
+ptid_t read_ptid (const char *buf, const char **obuf);
 char *write_ptid (char *buf, ptid_t ptid);
 
 int putpkt (char *buf);
 int putpkt_binary (char *buf, int len);
 int putpkt_notif (char *buf);
 int getpkt (char *buf);
-void remote_prepare (char *name);
-void remote_open (char *name);
+void remote_prepare (const char *name);
+void remote_open (const char *name);
 void remote_close (void);
 void write_ok (char *buf);
 void write_enn (char *buf);
@@ -44,8 +44,6 @@ void initialize_async_io (void);
 void enable_async_io (void);
 void disable_async_io (void);
 void check_remote_input_interrupt_request (void);
-void new_thread_notify (int id);
-void dead_thread_notify (int id);
 void prepare_resume_reply (char *buf, ptid_t ptid,
 			   struct target_waitstatus *status);
 

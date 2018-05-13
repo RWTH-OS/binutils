@@ -1,5 +1,5 @@
 /* nlmconv.c -- NLM conversion program
-   Copyright (C) 1993-2015 Free Software Foundation, Inc.
+   Copyright (C) 1993-2018 Free Software Foundation, Inc.
 
    This file is part of GNU Binutils.
 
@@ -1224,7 +1224,7 @@ copy_sections (bfd *inbfd, asection *insec, void *data_ptr)
   const char *inname;
   asection *outsec;
   bfd_size_type size;
-  void *contents;
+  bfd_byte *contents;
   long reloc_size;
   bfd_byte buf[4];
   bfd_size_type add;
@@ -1240,9 +1240,7 @@ copy_sections (bfd *inbfd, asection *insec, void *data_ptr)
     contents = NULL;
   else
     {
-      contents = xmalloc (size);
-      if (! bfd_get_section_contents (inbfd, insec, contents,
-				      (file_ptr) 0, size))
+      if (!bfd_malloc_and_get_section (inbfd, insec, &contents))
 	bfd_fatal (bfd_get_filename (inbfd));
     }
 
@@ -2082,7 +2080,7 @@ link_inputs (struct string_list *inputs, char *ld, char * mfile)
   for (q = inputs; q != NULL; q = q->next)
     ++c;
 
-  argv = (char **) alloca ((c + 7) * sizeof (char *));
+  argv = (char **) xmalloc ((c + 7) * sizeof (char *));
 
 #ifndef __MSDOS__
   if (ld == NULL)
@@ -2140,6 +2138,8 @@ link_inputs (struct string_list *inputs, char *ld, char * mfile)
 
   pid = pexecute (ld, argv, program_name, (char *) NULL, &errfmt, &errarg,
 		  PEXECUTE_SEARCH | PEXECUTE_ONE);
+  free (argv);
+
   if (pid == -1)
     {
       fprintf (stderr, _("%s: execution of %s failed: "), program_name, ld);

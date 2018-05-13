@@ -1,5 +1,5 @@
 /* Target operations for the remote server for GDB.
-   Copyright (C) 2002-2015 Free Software Foundation, Inc.
+   Copyright (C) 2002-2018 Free Software Foundation, Inc.
 
    Contributed by MontaVista Software.
 
@@ -24,17 +24,96 @@
 struct target_ops *the_target;
 
 int
-set_desired_thread (int use_general)
+set_desired_thread ()
 {
-  struct thread_info *found;
-
-  if (use_general == 1)
-    found = find_thread_ptid (general_thread);
-  else
-    found = find_thread_ptid (cont_thread);
+  thread_info *found = find_thread_ptid (general_thread);
 
   current_thread = found;
   return (current_thread != NULL);
+}
+
+/* The thread that was current before prepare_to_access_memory was
+   called.  done_accessing_memory uses this to restore the previous
+   selected thread.  */
+static ptid_t prev_general_thread;
+
+/* See target.h.  */
+
+int
+prepare_to_access_memory (void)
+{
+  /* The first thread found.  */
+  struct thread_info *first = NULL;
+  /* The first stopped thread found.  */
+  struct thread_info *stopped = NULL;
+  /* The current general thread, if found.  */
+  struct thread_info *current = NULL;
+
+  /* Save the general thread value, since prepare_to_access_memory could change
+     it.  */
+  prev_general_thread = general_thread;
+
+  if (the_target->prepare_to_access_memory != NULL)
+    {
+      int res;
+
+      res = the_target->prepare_to_access_memory ();
+      if (res != 0)
+	return res;
+    }
+
+  for_each_thread (prev_general_thread.pid (), [&] (thread_info *thread)
+    {
+      if (mythread_alive (thread->id))
+	{
+	  if (stopped == NULL && the_target->thread_stopped != NULL
+	      && thread_stopped (thread))
+	    stopped = thread;
+
+	  if (first == NULL)
+	    first = thread;
+
+	  if (current == NULL && prev_general_thread == thread->id)
+	    current = thread;
+	}
+    });
+
+  /* The thread we end up choosing.  */
+  struct thread_info *thread;
+
+  /* Prefer a stopped thread.  If none is found, try the current
+     thread.  Otherwise, take the first thread in the process.  If
+     none is found, undo the effects of
+     target->prepare_to_access_memory() and return error.  */
+  if (stopped != NULL)
+    thread = stopped;
+  else if (current != NULL)
+    thread = current;
+  else if (first != NULL)
+    thread = first;
+  else
+    {
+      done_accessing_memory ();
+      return 1;
+    }
+
+  current_thread = thread;
+  general_thread = ptid_of (thread);
+
+  return 0;
+}
+
+/* See target.h.  */
+
+void
+done_accessing_memory (void)
+{
+  if (the_target->done_accessing_memory != NULL)
+    the_target->done_accessing_memory ();
+
+  /* Restore the previous selected thread.  */
+  general_thread = prev_general_thread;
+  switch_to_thread (general_thread);
 }
 
 int
@@ -102,7 +181,7 @@ mywait (ptid_t ptid, struct target_waitstatus *ourstatus, int options,
   if (connected_wait)
     server_waiting = 1;
 
-  ret = (*the_target->wait) (ptid, ourstatus, options);
+  ret = target_wait (ptid, ourstatus, options);
 
   /* We don't expose _LOADED events to gdbserver core.  See the
      `dlls_changed' global.  */
@@ -153,6 +232,22 @@ target_stop_and_wait (ptid_t ptid)
 
 /* See target/target.h.  */
 
+ptid_t
+target_wait (ptid_t ptid, struct target_waitstatus *status, int options)
+{
+  return (*the_target->wait) (ptid, status, options);
+}
+
+/* See target/target.h.  */
+
+void
+target_mourn_inferior (ptid_t ptid)
+{
+  (*the_target->mourn) (find_process_pid (ptid_get_pid (ptid)));
+}
+
+/* See target/target.h.  */
+
 void
 target_continue_no_signal (ptid_t ptid)
 {
@@ -162,6 +257,28 @@ target_continue_no_signal (ptid_t ptid)
   resume_info.kind = resume_continue;
   resume_info.sig = GDB_SIGNAL_0;
   (*the_target->resume) (&resume_info, 1);
+}
+
+/* See target/target.h.  */
+
+void
+target_continue (ptid_t ptid, enum gdb_signal signal)
+{
+  struct thread_resume resume_info;
+
+  resume_info.thread = ptid;
+  resume_info.kind = resume_continue;
+  resume_info.sig = gdb_signal_to_host (signal);
+  (*the_target->resume) (&resume_info, 1);
+}
+
+/* See target/target.h.  */
+
+int
+target_supports_multi_process (void)
+{
+  return (the_target->supports_multi_process != NULL ?
+	  (*the_target->supports_multi_process) () : 0);
 }
 
 int
@@ -239,4 +356,52 @@ default_breakpoint_kind_from_pc (CORE_ADDR *pcptr)
 
   (*the_target->sw_breakpoint_from_kind) (0, &size);
   return size;
+}
+
+/* Define it.  */
+
+enum target_terminal::terminal_state target_terminal::terminal_state
+  = target_terminal::terminal_is_ours;
+
+/* See target/target.h.  */
+
+void
+target_terminal::init ()
+{
+  /* Placeholder needed because of fork_inferior.  Not necessary on
+     GDBserver.  */
+}
+
+/* See target/target.h.  */
+
+void
+target_terminal::inferior ()
+{
+  /* Placeholder needed because of fork_inferior.  Not necessary on
+     GDBserver.  */
+}
+
+/* See target/target.h.  */
+
+void
+target_terminal::ours ()
+{
+  /* Placeholder needed because of fork_inferior.  Not necessary on
+     GDBserver.  */
+}
+
+/* See target/target.h.  */
+
+void
+target_terminal::ours_for_output (void)
+{
+  /* Placeholder.  */
+}
+
+/* See target/target.h.  */
+
+void
+target_terminal::info (const char *arg, int from_tty)
+{
+  /* Placeholder.  */
 }

@@ -1,6 +1,6 @@
 /* Core dump and executable file functions above target vector, for GDB.
 
-   Copyright (C) 1986-2015 Free Software Foundation, Inc.
+   Copyright (C) 1986-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -33,10 +33,6 @@
 #include "observer.h"
 #include "cli/cli-utils.h"
 
-/* Local function declarations.  */
-
-extern void _initialize_core (void);
-
 /* You can have any number of hooks for `exec_file_command' command to
    call.  If there's only one hook, it is set in exec_file_display
    hook.  If there are two or more hooks, they are set in
@@ -65,7 +61,7 @@ struct target_ops *core_target;
 /* Backward compatability with old way of specifying core files.  */
 
 void
-core_file_command (char *filename, int from_tty)
+core_file_command (const char *filename, int from_tty)
 {
   dont_repeat ();		/* Either way, seems bogus.  */
 
@@ -130,29 +126,24 @@ specify_exec_file_hook (void (*hook) (const char *))
 void
 reopen_exec_file (void)
 {
-  char *filename;
   int res;
   struct stat st;
-  struct cleanup *cleanups;
 
   /* Don't do anything if there isn't an exec file.  */
   if (exec_bfd == NULL)
     return;
 
   /* If the timestamp of the exec file has changed, reopen it.  */
-  filename = xstrdup (bfd_get_filename (exec_bfd));
-  cleanups = make_cleanup (xfree, filename);
-  res = stat (filename, &st);
+  std::string filename = bfd_get_filename (exec_bfd);
+  res = stat (filename.c_str (), &st);
 
-  if (exec_bfd_mtime && exec_bfd_mtime != st.st_mtime)
-    exec_file_attach (filename, 0);
+  if (res == 0 && exec_bfd_mtime && exec_bfd_mtime != st.st_mtime)
+    exec_file_attach (filename.c_str (), 0);
   else
     /* If we accessed the file since last opening it, close it now;
        this stops GDB from holding the executable open after it
        exits.  */
     bfd_cache_close_all ();
-
-  do_cleanups (cleanups);
 }
 
 /* If we have both a core file and an exec file,
@@ -170,9 +161,7 @@ validate_files (void)
     }
 }
 
-/* Return the name of the executable file as a string.
-   ERR nonzero means get error if there is none specified;
-   otherwise return 0 in that case.  */
+/* See common/common-inferior.h.  */
 
 char *
 get_exec_file (int err)
@@ -188,7 +177,7 @@ Use the \"file\" or \"exec-file\" command."));
 }
 
 
-char *
+std::string
 memory_error_message (enum target_xfer_status err,
 		      struct gdbarch *gdbarch, CORE_ADDR memaddr)
 {
@@ -197,11 +186,11 @@ memory_error_message (enum target_xfer_status err,
     case TARGET_XFER_E_IO:
       /* Actually, address between memaddr and memaddr + len was out of
 	 bounds.  */
-      return xstrprintf (_("Cannot access memory at address %s"),
-			 paddress (gdbarch, memaddr));
+      return string_printf (_("Cannot access memory at address %s"),
+			    paddress (gdbarch, memaddr));
     case TARGET_XFER_UNAVAILABLE:
-      return xstrprintf (_("Memory at address %s unavailable."),
-			 paddress (gdbarch, memaddr));
+      return string_printf (_("Memory at address %s unavailable."),
+			    paddress (gdbarch, memaddr));
     default:
       internal_error (__FILE__, __LINE__,
 		      "unhandled target_xfer_status: %s (%s)",
@@ -215,12 +204,10 @@ memory_error_message (enum target_xfer_status err,
 void
 memory_error (enum target_xfer_status err, CORE_ADDR memaddr)
 {
-  char *str;
   enum errors exception = GDB_NO_ERROR;
 
   /* Build error string.  */
-  str = memory_error_message (err, target_gdbarch (), memaddr);
-  make_cleanup (xfree, str);
+  std::string str = memory_error_message (err, target_gdbarch (), memaddr);
 
   /* Choose the right error to throw.  */
   switch (err)
@@ -234,13 +221,14 @@ memory_error (enum target_xfer_status err, CORE_ADDR memaddr)
     }
 
   /* Throw it.  */
-  throw_error (exception, ("%s"), str);
+  throw_error (exception, ("%s"), str.c_str ());
 }
 
-/* Same as target_read_memory, but report an error if can't read.  */
+/* Helper function.  */
 
-void
-read_memory (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
+static void
+read_memory_object (enum target_object object, CORE_ADDR memaddr,
+		    gdb_byte *myaddr, ssize_t len)
 {
   ULONGEST xfered = 0;
 
@@ -250,7 +238,7 @@ read_memory (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
       ULONGEST xfered_len;
 
       status = target_xfer_partial (current_target.beneath,
-				    TARGET_OBJECT_MEMORY, NULL,
+				    object, NULL,
 				    myaddr + xfered, NULL,
 				    memaddr + xfered, len - xfered,
 				    &xfered_len);
@@ -264,16 +252,20 @@ read_memory (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
     }
 }
 
+/* Same as target_read_memory, but report an error if can't read.  */
+
+void
+read_memory (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
+{
+  read_memory_object (TARGET_OBJECT_MEMORY, memaddr, myaddr, len);
+}
+
 /* Same as target_read_stack, but report an error if can't read.  */
 
 void
 read_stack (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
 {
-  int status;
-
-  status = target_read_stack (memaddr, myaddr, len);
-  if (status != 0)
-    memory_error (TARGET_XFER_E_IO, memaddr);
+  read_memory_object (TARGET_OBJECT_STACK_MEMORY, memaddr, myaddr, len);
 }
 
 /* Same as target_read_code, but report an error if can't read.  */
@@ -281,11 +273,7 @@ read_stack (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
 void
 read_code (CORE_ADDR memaddr, gdb_byte *myaddr, ssize_t len)
 {
-  int status;
-
-  status = target_read_code (memaddr, myaddr, len);
-  if (status != 0)
-    memory_error (TARGET_XFER_E_IO, memaddr);
+  read_memory_object (TARGET_OBJECT_CODE_MEMORY, memaddr, myaddr, len);
 }
 
 /* Read memory at MEMADDR of length LEN and put the contents in
@@ -303,6 +291,24 @@ safe_read_memory_integer (CORE_ADDR memaddr, int len,
     return 0;
 
   *return_value = extract_signed_integer (buf, len, byte_order);
+  return 1;
+}
+
+/* Read memory at MEMADDR of length LEN and put the contents in
+   RETURN_VALUE.  Return 0 if MEMADDR couldn't be read and non-zero
+   if successful.  */
+
+int
+safe_read_memory_unsigned_integer (CORE_ADDR memaddr, int len,
+				   enum bfd_endian byte_order,
+				   ULONGEST *return_value)
+{
+  gdb_byte buf[sizeof (ULONGEST)];
+
+  if (target_read_memory (memaddr, buf, len))
+    return 0;
+
+  *return_value = extract_unsigned_integer (buf, len, byte_order);
   return 1;
 }
 
@@ -446,11 +452,8 @@ show_gnutarget_string (struct ui_file *file, int from_tty,
 		    _("The current BFD target is \"%s\".\n"), value);
 }
 
-static void set_gnutarget_command (char *, int,
-				   struct cmd_list_element *);
-
 static void
-set_gnutarget_command (char *ignore, int from_tty,
+set_gnutarget_command (const char *ignore, int from_tty,
 		       struct cmd_list_element *c)
 {
   char *gend = gnutarget_string + strlen (gnutarget_string);
@@ -466,8 +469,9 @@ set_gnutarget_command (char *ignore, int from_tty,
 
 /* A completion function for "set gnutarget".  */
 
-static VEC (char_ptr) *
+static void
 complete_set_gnutarget (struct cmd_list_element *cmd,
+			completion_tracker &tracker,
 			const char *text, const char *word)
 {
   static const char **bfd_targets;
@@ -485,12 +489,12 @@ complete_set_gnutarget (struct cmd_list_element *cmd,
       bfd_targets[last + 1] = NULL;
     }
 
-  return complete_on_enum (bfd_targets, text, word);
+  complete_on_enum (tracker, bfd_targets, text, word);
 }
 
 /* Set the gnutarget.  */
 void
-set_gnutarget (char *newtarget)
+set_gnutarget (const char *newtarget)
 {
   if (gnutarget_string != NULL)
     xfree (gnutarget_string);

@@ -1,5 +1,5 @@
 /* Register protocol definition structures for the GNU Debugger
-   Copyright (C) 2001-2015 Free Software Foundation, Inc.
+   Copyright (C) 2001-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -34,11 +34,18 @@ struct reg
 
   /* The size (in bits) of the value of this register, as transmitted.  */
   int size;
+
+  bool operator== (const reg &other) const
+  {
+    return (strcmp (name, other.name) == 0
+	    && offset == other.offset
+	    && size == other.size);
+  }
+
+  bool operator!= (const reg &other) const
+  {
+    return !(*this == other);
+  }
 };
-
-/* Set the current remote protocol and register cache according to the array
-   ``regs'', with ``n'' elements.  */
-
-void set_register_cache (struct reg *regs, int n);
 
 #endif /* REGDEF_H */

@@ -133,6 +133,12 @@
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
 
+/* Define to 1 if the system has the type `long double'. */
+#undef HAVE_LONG_DOUBLE
+
+/* Define to 1 if the system has the type `long long'. */
+#undef HAVE_LONG_LONG
+
 /* Define if <sys/procfs.h> has lwpstatus_t. */
 #undef HAVE_LWPSTATUS_T
 
@@ -337,6 +343,9 @@
 /* Name of host specific header file to include in trad-core.c. */
 #undef TRAD_HEADER
 
+/* Define if 64-bit archives should always be used. */
+#undef USE_64_BIT_ARCHIVE
+
 /* Use b modifier when opening binary files? */
 #undef USE_BINARY_FOPEN
 
@@ -348,9 +357,6 @@
 
 /* Define if we should default to creating read-only plt entries */
 #undef USE_SECUREPLT
-
-/* Define if we may generate symbols with ELF's STT_COMMON type */
-#undef USE_STT_COMMON
 
 /* Enable extensions on AIX 3, Interix.  */
 #ifndef _ALL_SOURCE

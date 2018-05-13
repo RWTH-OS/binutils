@@ -1,4 +1,4 @@
-/* Copyright (C) 1986-2015 Free Software Foundation, Inc.
+/* Copyright (C) 1986-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -19,6 +19,7 @@
 #define INFRUN_H 1
 
 #include "symtab.h"
+#include "common/byte-vector.h"
 
 struct target_waitstatus;
 struct frame_info;
@@ -34,11 +35,6 @@ extern int debug_displaced;
 /* Nonzero if we want to give control to the user when we're notified
    of shared library events by the dynamic linker.  */
 extern int stop_on_solib_events;
-
-/* Are we simulating synchronous execution? This is used in async gdb
-   to implement the 'run', 'continue' etc commands, which will not
-   redisplay the prompt until the execution is actually over.  */
-extern int sync_execution;
 
 /* True if execution commands resume all threads of all processes by
    default; otherwise, resume only threads of the current inferior
@@ -112,6 +108,12 @@ extern int normal_stop (void);
 extern void get_last_target_status (ptid_t *ptid,
 				    struct target_waitstatus *status);
 
+extern void set_last_target_status (ptid_t ptid,
+				    struct target_waitstatus status);
+
+/* Stop all threads.  Only returns after everything is halted.  */
+extern void stop_all_threads (void);
+
 extern void prepare_for_detach (void);
 
 extern void fetch_inferior_event (void *);
@@ -126,6 +128,10 @@ extern void insert_step_resume_breakpoint_at_sal (struct gdbarch *,
    ADDRESS in ASPACE.  */
 extern int stepping_past_instruction_at (struct address_space *aspace,
 					 CORE_ADDR address);
+
+/* Returns true if thread whose thread number is THREAD is stepping
+   over a breakpoint.  */
+extern int thread_is_stepping_over_breakpoint (int thread);
 
 /* Returns true if we're trying to step past an instruction that
    triggers a non-steppable watchpoint.  */
@@ -227,5 +233,33 @@ extern struct thread_info *step_over_queue_head;
 /* Remove breakpoints if possible (usually that means, if everything
    is stopped).  On failure, print a message.  */
 extern void maybe_remove_breakpoints (void);
+
+/* If a UI was in sync execution mode, and now isn't, restore its
+   prompt (a synchronous execution command has finished, and we're
+   ready for input).  */
+extern void all_uis_check_sync_execution_done (void);
+
+/* If a UI was in sync execution mode, and hasn't displayed the prompt
+   yet, re-disable its prompt (a synchronous execution command was
+   started or re-started).  */
+extern void all_uis_on_sync_execution_starting (void);
+
+/* Base class for displaced stepping closures (the arch-specific data).  */
+
+struct displaced_step_closure
+{
+  virtual ~displaced_step_closure () = 0;
+};
+
+/* A simple displaced step closure that contains only a byte buffer.  */
+
+struct buf_displaced_step_closure : displaced_step_closure
+{
+  buf_displaced_step_closure (int buf_size)
+  : buf (buf_size)
+  {}
+
+  gdb::byte_vector buf;
+};
 
 #endif /* INFRUN_H */

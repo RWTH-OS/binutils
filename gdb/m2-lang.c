@@ -1,6 +1,6 @@
 /* Modula 2 language support routines for GDB, the GNU debugger.
 
-   Copyright (C) 1992-2015 Free Software Foundation, Inc.
+   Copyright (C) 1992-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -28,7 +28,6 @@
 #include "c-lang.h"
 #include "valprint.h"
 
-extern void _initialize_m2_language (void);
 static void m2_printchar (int, struct type *, struct ui_file *);
 static void m2_emit_char (int, struct type *, struct ui_file *, int);
 
@@ -354,7 +353,7 @@ const struct exp_descriptor exp_descriptor_modula2 =
   evaluate_subexp_modula2
 };
 
-const struct language_defn m2_language_defn =
+extern const struct language_defn m2_language_defn =
 {
   "modula-2",
   "Modula-2",
@@ -363,9 +362,10 @@ const struct language_defn m2_language_defn =
   case_sensitive_on,
   array_row_major,
   macro_expansion_no,
+  NULL,
   &exp_descriptor_modula2,
   m2_parse,			/* parser */
-  m2_error,			/* parser error function */
+  m2_yyerror,			/* parser error function */
   null_post_parser,
   m2_printchar,			/* Print character constant */
   m2_printstr,			/* function to print string constant */
@@ -380,19 +380,22 @@ const struct language_defn m2_language_defn =
   basic_lookup_symbol_nonlocal,	/* lookup_symbol_nonlocal */
   basic_lookup_transparent_type,/* lookup_transparent_type */
   NULL,				/* Language specific symbol demangler */
+  NULL,
   NULL,				/* Language specific
 				   class_name_from_physname */
   m2_op_print_tab,		/* expression operators for printing */
   0,				/* arrays are first-class (not c-style) */
   0,				/* String lower bound */
   default_word_break_characters,
-  default_make_symbol_completion_list,
+  default_collect_symbol_completion_matches,
   m2_language_arch_info,
   default_print_array_index,
   default_pass_by_reference,
   default_get_string,
-  NULL,				/* la_get_symbol_name_cmp */
+  c_watch_location_expression,
+  NULL,				/* la_get_symbol_name_matcher */
   iterate_over_symbols,
+  default_search_name_hash,
   &default_varobj_ops,
   NULL,
   NULL,
@@ -411,7 +414,8 @@ build_m2_types (struct gdbarch *gdbarch)
   builtin_m2_type->builtin_card
     = arch_integer_type (gdbarch, gdbarch_int_bit (gdbarch), 1, "CARDINAL");
   builtin_m2_type->builtin_real
-    = arch_float_type (gdbarch, gdbarch_float_bit (gdbarch), "REAL", NULL);
+    = arch_float_type (gdbarch, gdbarch_float_bit (gdbarch), "REAL",
+		       gdbarch_float_format (gdbarch));
   builtin_m2_type->builtin_char
     = arch_character_type (gdbarch, TARGET_CHAR_BIT, 1, "CHAR");
   builtin_m2_type->builtin_bool
@@ -435,6 +439,4 @@ void
 _initialize_m2_language (void)
 {
   m2_type_data = gdbarch_data_register_post_init (build_m2_types);
-
-  add_language (&m2_language_defn);
 }

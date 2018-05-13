@@ -1,6 +1,6 @@
 // elfcpp.h -- main header file for elfcpp    -*- C++ -*-
 
-// Copyright (C) 2006-2015 Free Software Foundation, Inc.
+// Copyright (C) 2006-2018 Free Software Foundation, Inc.
 // Written by Ian Lance Taylor <iant@google.com>.
 
 // This file is part of elfcpp.
@@ -269,6 +269,7 @@ enum EM
   EM_UNICORE = 110,
   EM_ALTERA_NIOS2 = 113,
   EM_CRX = 114,
+  EM_TI_PRU = 144,
   EM_AARCH64 = 183,
   EM_TILEGX = 191,
   // The Morph MT.
@@ -407,6 +408,8 @@ enum SHT
   SHT_MIPS_REGINFO = 0x70000006,
   // Section contains miscellaneous options.
   SHT_MIPS_OPTIONS = 0x7000000d,
+  // ABI related flags section.
+  SHT_MIPS_ABIFLAGS = 0x7000002a,
 
   // AARCH64-specific section type.
   SHT_AARCH64_ATTRIBUTES = 0x70000003,
@@ -513,7 +516,9 @@ enum PT
   // Platform architecture compatibility information
   PT_AARCH64_ARCHEXT = 0x70000000,
   // Exception unwind tables
-  PT_AARCH64_UNWIND = 0x70000001
+  PT_AARCH64_UNWIND = 0x70000001,
+  // 4k page table size
+  PT_S390_PGSTE = 0x70000000,
 };
 
 // The valid bit flags found in the Phdr p_flags field.
@@ -764,12 +769,18 @@ enum DT
   // Specify the value of _GLOBAL_OFFSET_TABLE_.
   DT_PPC_GOT = 0x70000000,
 
+  // Specify whether various optimisations are possible.
+  DT_PPC_OPT = 0x70000001,
+
   // Specify the start of the .glink section.
   DT_PPC64_GLINK = 0x70000000,
 
   // Specify the start and size of the .opd section.
   DT_PPC64_OPD = 0x70000001,
   DT_PPC64_OPDSZ = 0x70000002,
+
+  // Specify whether various optimisations are possible.
+  DT_PPC64_OPT = 0x70000003,
 
   // The index of an STT_SPARC_REGISTER symbol within the DT_SYMTAB
   // symbol table.  One dynamic entry exists for every STT_SPARC_REGISTER
@@ -867,6 +878,8 @@ enum DT
   DT_MIPS_PLTGOT = 0x70000032,
   // Points to the base of a writable PLT.
   DT_MIPS_RWPLT = 0x70000034,
+  // Relative offset of run time loader map, used for debugging.
+  DT_MIPS_RLD_MAP_REL = 0x70000035,
 
   DT_AUXILIARY = 0x7ffffffd,
   DT_USED = 0x7ffffffe,
@@ -1342,9 +1355,26 @@ class Chdr_write
   put_ch_addralign(typename Elf_types<size>::Elf_WXword v)
   { this->p_->ch_addralign = Convert<size, big_endian>::convert_host(v); }
 
+  void
+  put_ch_reserved(Elf_Word);
+
  private:
   internal::Chdr_data<size>* p_;
 };
+
+template<>
+inline void
+elfcpp::Chdr_write<64, true>::put_ch_reserved(Elf_Word v)
+{
+  this->p_->ch_reserved = v;
+}
+
+template<>
+inline void
+elfcpp::Chdr_write<64, false>::put_ch_reserved(Elf_Word v)
+{
+  this->p_->ch_reserved = v;
+}
 
 // Accessor class for an ELF segment header.
 
@@ -1660,6 +1690,172 @@ class Rela_write
 
  private:
   internal::Rela_data<size>* p_;
+};
+
+// MIPS-64 has a non-standard relocation layout.
+
+template<bool big_endian>
+class Mips64_rel
+{
+ public:
+  Mips64_rel(const unsigned char* p)
+    : p_(reinterpret_cast<const internal::Mips64_rel_data*>(p))
+  { }
+
+  template<typename File>
+  Mips64_rel(File* file, typename File::Location loc)
+    : p_(reinterpret_cast<const internal::Mips64_rel_data*>(
+	   file->view(loc.file_offset, loc.data_size).data()))
+  { }
+
+  typename Elf_types<64>::Elf_Addr
+  get_r_offset() const
+  { return Convert<64, big_endian>::convert_host(this->p_->r_offset); }
+
+  Elf_Word
+  get_r_sym() const
+  { return Convert<32, big_endian>::convert_host(this->p_->r_sym); }
+
+  unsigned char
+  get_r_ssym() const
+  { return this->p_->r_ssym; }
+
+  unsigned char
+  get_r_type() const
+  { return this->p_->r_type; }
+
+  unsigned char
+  get_r_type2() const
+  { return this->p_->r_type2; }
+
+  unsigned char
+  get_r_type3() const
+  { return this->p_->r_type3; }
+
+ private:
+  const internal::Mips64_rel_data* p_;
+};
+
+template<bool big_endian>
+class Mips64_rel_write
+{
+ public:
+  Mips64_rel_write(unsigned char* p)
+    : p_(reinterpret_cast<internal::Mips64_rel_data*>(p))
+  { }
+
+  void
+  put_r_offset(typename Elf_types<64>::Elf_Addr v)
+  { this->p_->r_offset = Convert<64, big_endian>::convert_host(v); }
+
+  void
+  put_r_sym(Elf_Word v)
+  { this->p_->r_sym = Convert<32, big_endian>::convert_host(v); }
+
+  void
+  put_r_ssym(unsigned char v)
+  { this->p_->r_ssym = v; }
+
+  void
+  put_r_type(unsigned char v)
+  { this->p_->r_type = v; }
+
+  void
+  put_r_type2(unsigned char v)
+  { this->p_->r_type2 = v; }
+
+  void
+  put_r_type3(unsigned char v)
+  { this->p_->r_type3 = v; }
+
+ private:
+  internal::Mips64_rel_data* p_;
+};
+
+template<bool big_endian>
+class Mips64_rela
+{
+ public:
+  Mips64_rela(const unsigned char* p)
+    : p_(reinterpret_cast<const internal::Mips64_rela_data*>(p))
+  { }
+
+  template<typename File>
+  Mips64_rela(File* file, typename File::Location loc)
+    : p_(reinterpret_cast<const internal::Mips64_rela_data*>(
+	   file->view(loc.file_offset, loc.data_size).data()))
+  { }
+
+  typename Elf_types<64>::Elf_Addr
+  get_r_offset() const
+  { return Convert<64, big_endian>::convert_host(this->p_->r_offset); }
+
+  Elf_Word
+  get_r_sym() const
+  { return Convert<32, big_endian>::convert_host(this->p_->r_sym); }
+
+  unsigned char
+  get_r_ssym() const
+  { return this->p_->r_ssym; }
+
+  unsigned char
+  get_r_type() const
+  { return this->p_->r_type; }
+
+  unsigned char
+  get_r_type2() const
+  { return this->p_->r_type2; }
+
+  unsigned char
+  get_r_type3() const
+  { return this->p_->r_type3; }
+
+  typename Elf_types<64>::Elf_Swxword
+  get_r_addend() const
+  { return Convert<64, big_endian>::convert_host(this->p_->r_addend); }
+
+ private:
+  const internal::Mips64_rela_data* p_;
+};
+
+template<bool big_endian>
+class Mips64_rela_write
+{
+ public:
+  Mips64_rela_write(unsigned char* p)
+    : p_(reinterpret_cast<internal::Mips64_rela_data*>(p))
+  { }
+
+  void
+  put_r_offset(typename Elf_types<64>::Elf_Addr v)
+  { this->p_->r_offset = Convert<64, big_endian>::convert_host(v); }
+
+  void
+  put_r_sym(Elf_Word v)
+  { this->p_->r_sym = Convert<32, big_endian>::convert_host(v); }
+
+  void
+  put_r_ssym(unsigned char v)
+  { this->p_->r_ssym = v; }
+
+  void
+  put_r_type(unsigned char v)
+  { this->p_->r_type = v; }
+
+  void
+  put_r_type2(unsigned char v)
+  { this->p_->r_type2 = v; }
+
+  void
+  put_r_type3(unsigned char v)
+  { this->p_->r_type3 = v; }
+
+  void
+  put_r_addend(typename Elf_types<64>::Elf_Swxword v)
+  { this->p_->r_addend = Convert<64, big_endian>::convert_host(v); }
+
+ private:
+  internal::Mips64_rela_data* p_;
 };
 
 // Accessor classes for entries in the ELF SHT_DYNAMIC section aka

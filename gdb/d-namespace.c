@@ -1,6 +1,6 @@
 /* Helper routines for D support in GDB.
 
-   Copyright (C) 2014-2015 Free Software Foundation, Inc.
+   Copyright (C) 2014-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -108,15 +108,12 @@ d_lookup_symbol (const struct language_defn *langdef,
 
   if (search)
     {
-      char *classname, *nested;
+      std::string classname, nested;
       unsigned int prefix_len;
-      struct cleanup *cleanup;
       struct block_symbol class_sym;
 
       /* A simple lookup failed.  Check if the symbol was defined in
 	 a base class.  */
-
-      cleanup = make_cleanup (null_cleanup, NULL);
 
       /* Find the name of the class and the name of the method,
 	 variable, etc.  */
@@ -130,42 +127,31 @@ d_lookup_symbol (const struct language_defn *langdef,
 
 	  lang_this = lookup_language_this (language_def (language_d), block);
 	  if (lang_this.symbol == NULL)
-	    {
-	      do_cleanups (cleanup);
-	      return (struct block_symbol) {NULL, NULL};
-	    }
+	    return null_block_symbol;
 
 	  type = check_typedef (TYPE_TARGET_TYPE (SYMBOL_TYPE (lang_this.symbol)));
-	  classname = xstrdup (TYPE_NAME (type));
-	  nested = xstrdup (name);
+	  classname = TYPE_NAME (type);
+	  nested = name;
 	}
       else
 	{
 	  /* The class name is everything up to and including PREFIX_LEN.  */
-	  classname = savestring (name, prefix_len);
+	  classname = std::string (name, prefix_len);
 
 	  /* The rest of the name is everything else past the initial scope
 	     operator.  */
-	  nested = xstrdup (name + prefix_len + 1);
+	  nested = std::string (name + prefix_len + 1);
 	}
-
-      /* Add cleanups to free memory for these strings.  */
-      make_cleanup (xfree, classname);
-      make_cleanup (xfree, nested);
 
       /* Lookup a class named CLASSNAME.  If none is found, there is nothing
 	 more that can be done.  */
-      class_sym = lookup_global_symbol (classname, block, domain);
+      class_sym = lookup_global_symbol (classname.c_str (), block, domain);
       if (class_sym.symbol == NULL)
-	{
-	  do_cleanups (cleanup);
-	  return (struct block_symbol) {NULL, NULL};
-	}
+	return null_block_symbol;
 
       /* Look for a symbol named NESTED in this class.  */
       sym = d_lookup_nested_symbol (SYMBOL_TYPE (class_sym.symbol),
-				    nested, block);
-      do_cleanups (cleanup);
+				    nested.c_str (), block);
     }
 
   return sym;
@@ -260,18 +246,14 @@ static struct block_symbol
 find_symbol_in_baseclass (struct type *parent_type, const char *name,
 			  const struct block *block)
 {
-  char *concatenated_name = NULL;
   struct block_symbol sym;
-  struct cleanup *cleanup;
   int i;
 
   sym.symbol = NULL;
   sym.block = NULL;
-  cleanup = make_cleanup (free_current_contents, &concatenated_name);
 
   for (i = 0; i < TYPE_N_BASECLASSES (parent_type); ++i)
     {
-      size_t len;
       struct type *base_type = TYPE_BASECLASS (parent_type, i);
       const char *base_name = TYPE_BASECLASS_NAME (parent_type, i);
 
@@ -287,10 +269,8 @@ find_symbol_in_baseclass (struct type *parent_type, const char *name,
       /* Now search all static file-level symbols.  We have to do this for
 	 things like typedefs in the class.  First search in this symtab,
 	 what we want is possibly there.  */
-      len = strlen (base_name) + strlen (name) + 2;
-      concatenated_name = (char *) xrealloc (concatenated_name, len);
-      xsnprintf (concatenated_name, len, "%s.%s", base_name, name);
-      sym = lookup_symbol_in_static_block (concatenated_name, block,
+      std::string concatenated_name = std::string (base_name) + "." + name;
+      sym = lookup_symbol_in_static_block (concatenated_name.c_str (), block,
 					   VAR_DOMAIN);
       if (sym.symbol != NULL)
 	break;
@@ -298,7 +278,7 @@ find_symbol_in_baseclass (struct type *parent_type, const char *name,
       /* Nope.  We now have to search all static blocks in all objfiles,
 	 even if block != NULL, because there's no guarantees as to which
 	 symtab the symbol we want is in.  */
-      sym = lookup_static_symbol (concatenated_name, VAR_DOMAIN);
+      sym = lookup_static_symbol (concatenated_name.c_str (), VAR_DOMAIN);
       if (sym.symbol != NULL)
 	break;
 
@@ -312,7 +292,6 @@ find_symbol_in_baseclass (struct type *parent_type, const char *name,
 	}
     }
 
-  do_cleanups (cleanup);
   return sym;
 }
 
@@ -370,50 +349,23 @@ d_lookup_nested_symbol (struct type *parent_type,
 
     case TYPE_CODE_FUNC:
     case TYPE_CODE_METHOD:
-      return (struct block_symbol) {NULL, NULL};
+      return null_block_symbol;
 
     default:
       gdb_assert_not_reached ("called with non-aggregate type.");
     }
 }
 
-/* Used for cleanups to reset the "searched" flag incase
-   of an error.  */
-
-static void
-reset_directive_searched (void *data)
-{
-  struct using_direct *direct = (struct using_direct *) data;
-  direct->searched = 0;
-}
-
 /* Search for NAME by applying all import statements belonging to
-   BLOCK which are applicable in SCOPE.
-
-   If SEARCH_PARENTS the search will include imports which are
-   applicable in parents of SCOPE.
-   Example:
-
-     module A;
-     import X;
-     void B() {
-       import Y;
-     }
-
-   If SCOPE is "A.B" and SEARCH_PARENTS is true, the imports of
-   modules X and Y will be considered.  If SEARCH_PARENTS is false
-   only the import of Y is considered.  */
+   BLOCK which are applicable in SCOPE.  */
 
 static struct block_symbol
 d_lookup_symbol_imports (const char *scope, const char *name,
 			 const struct block *block,
-			 const domain_enum domain,
-			 const int search_parents)
+			 const domain_enum domain)
 {
   struct using_direct *current;
   struct block_symbol sym;
-  int directive_match;
-  struct cleanup *searched_cleanup;
 
   /* First, try to find the symbol in the given module.  */
   sym = d_lookup_symbol_in_module (scope, name, block, domain, 1);
@@ -430,24 +382,14 @@ d_lookup_symbol_imports (const char *scope, const char *name,
        current = current->next)
     {
       const char **excludep;
-      int len = strlen (current->import_dest);
 
-      directive_match = (search_parents
-			 ? (strncmp (scope, current->import_dest, len) == 0
-			    && (len == 0
-				|| scope[len] == '.'
-				|| scope[len] == '\0'))
-			 : strcmp (scope, current->import_dest) == 0);
-
-      /* If the import destination is the current scope or one of its
-	 ancestors then it is applicable.  */
-      if (directive_match && !current->searched)
+      /* If the import destination is the current scope then search it.  */
+      if (!current->searched && strcmp (scope, current->import_dest) == 0)
 	{
 	  /* Mark this import as searched so that the recursive call
 	     does not search it again.  */
-	  current->searched = 1;
-	  searched_cleanup = make_cleanup (reset_directive_searched,
-					   current);
+	  scoped_restore restore_searched
+	    = make_scoped_restore (&current->searched, 1);
 
 	  /* If there is an import of a single declaration, compare the
 	     imported declaration (after optional renaming by its alias)
@@ -465,9 +407,6 @@ d_lookup_symbol_imports (const char *scope, const char *name,
 	     declaration, the search of this import is complete.  */
 	  if (sym.symbol != NULL || current->declaration)
 	    {
-	      current->searched = 0;
-	      discard_cleanups (searched_cleanup);
-
 	      if (sym.symbol != NULL)
 		return sym;
 
@@ -479,10 +418,7 @@ d_lookup_symbol_imports (const char *scope, const char *name,
 	    if (strcmp (name, *excludep) == 0)
 	      break;
 	  if (*excludep)
-	    {
-	      discard_cleanups (searched_cleanup);
-	      continue;
-	    }
+	    continue;
 
 	  /* If the import statement is creating an alias.  */
 	  if (current->alias != NULL)
@@ -508,9 +444,9 @@ d_lookup_symbol_imports (const char *scope, const char *name,
 		    {
 		      /* Skip the '.'  */
 		      name_scope++;
-		      sym = d_lookup_symbol_imports (current->import_src,
-						     name + name_scope,
-						     block, domain, 0);
+		      sym = d_lookup_symbol_in_module (current->import_src,
+						       name + name_scope,
+						       block, domain, 1);
 		    }
 		}
 	    }
@@ -519,18 +455,16 @@ d_lookup_symbol_imports (const char *scope, const char *name,
 	      /* If this import statement creates no alias, pass
 		 current->import_src as MODULE to direct the search
 		 towards the imported module.  */
-	      sym = d_lookup_symbol_imports (current->import_src,
-					     name, block, domain, 0);
+	      sym = d_lookup_symbol_in_module (current->import_src,
+					       name, block, domain, 1);
 	    }
-	  current->searched = 0;
-	  discard_cleanups (searched_cleanup);
 
 	  if (sym.symbol != NULL)
 	    return sym;
 	}
     }
 
-  return (struct block_symbol) {NULL, NULL};
+  return null_block_symbol;
 }
 
 /* Searches for NAME in the current module, and by applying relevant
@@ -554,7 +488,7 @@ d_lookup_symbol_module (const char *scope, const char *name,
      blocks.  */
   while (block != NULL)
     {
-      sym = d_lookup_symbol_imports (scope, name, block, domain, 1);
+      sym = d_lookup_symbol_imports (scope, name, block, domain);
 
       if (sym.symbol != NULL)
 	return sym;
@@ -562,7 +496,7 @@ d_lookup_symbol_module (const char *scope, const char *name,
       block = BLOCK_SUPERBLOCK (block);
     }
 
-  return (struct block_symbol) {NULL, NULL};
+  return null_block_symbol;
 }
 
 /* The D-specific version of name lookup for static and global names

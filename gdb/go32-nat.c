@@ -1,5 +1,5 @@
 /* Native debugging support for Intel x86 running DJGPP.
-   Copyright (C) 1997-2015 Free Software Foundation, Inc.
+   Copyright (C) 1997-2018 Free Software Foundation, Inc.
    Written by Robert Hoehne.
 
    This file is part of GDB.
@@ -493,7 +493,7 @@ go32_wait (struct target_ops *ops,
 static void
 fetch_register (struct regcache *regcache, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   if (regno < gdbarch_fp0_regnum (gdbarch))
     regcache_raw_supply (regcache, regno,
 			 (char *) &a_tss + regno_mapping[regno].tss_ofs);
@@ -514,7 +514,7 @@ go32_fetch_registers (struct target_ops *ops,
   else
     {
       for (regno = 0;
-	   regno < gdbarch_fp0_regnum (get_regcache_arch (regcache));
+	   regno < gdbarch_fp0_regnum (regcache->arch ());
 	   regno++)
 	fetch_register (regcache, regno);
       i387_supply_fsave (regcache, -1, &npx);
@@ -524,7 +524,7 @@ go32_fetch_registers (struct target_ops *ops,
 static void
 store_register (const struct regcache *regcache, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   if (regno < gdbarch_fp0_regnum (gdbarch))
     regcache_raw_collect (regcache, regno,
 			  (char *) &a_tss + regno_mapping[regno].tss_ofs);
@@ -546,7 +546,7 @@ go32_store_registers (struct target_ops *ops,
     store_register (regcache, regno);
   else
     {
-      for (r = 0; r < gdbarch_fp0_regnum (get_regcache_arch (regcache)); r++)
+      for (r = 0; r < gdbarch_fp0_regnum (regcache->arch ()); r++)
 	store_register (regcache, r);
       i387_collect_fsave (regcache, -1, &npx);
     }
@@ -631,8 +631,9 @@ go32_kill_inferior (struct target_ops *ops)
 }
 
 static void
-go32_create_inferior (struct target_ops *ops, char *exec_file,
-		      char *args, char **env, int from_tty)
+go32_create_inferior (struct target_ops *ops,
+		      const char *exec_file,
+		      const std::string &allargs, char **env, int from_tty)
 {
   extern char **environ;
   jmp_buf start_state;
@@ -641,6 +642,7 @@ go32_create_inferior (struct target_ops *ops, char *exec_file,
   size_t cmdlen;
   struct inferior *inf;
   int result;
+  const char *args = allargs.c_str ();
 
   /* If no exec file handed to us, get it from the exec-file command -- with
      a good, common error message if none is specified.  */
@@ -677,7 +679,7 @@ go32_create_inferior (struct target_ops *ops, char *exec_file,
   if (cmdlen > 1024*1024)
     error (_("Command line too long."));
 
-  cmdline = xmalloc (cmdlen + 4);
+  cmdline = (char *) xmalloc (cmdlen + 4);
   strcpy (cmdline + 1, args);
   /* If the command-line length fits into DOS 126-char limits, use the
      DOS command tail format; otherwise, tell v2loadimage to pass it
@@ -938,10 +940,10 @@ go32_terminal_ours (struct target_ops *self)
 static int
 go32_thread_alive (struct target_ops *ops, ptid_t ptid)
 {
-  return !ptid_equal (inferior_ptid, null_ptid);
+  return !ptid_equal (ptid, null_ptid);
 }
 
-static char *
+static const char *
 go32_pid_to_str (struct target_ops *ops, ptid_t ptid)
 {
   return normal_pid_to_str (ptid);
@@ -1059,7 +1061,7 @@ print_mem (unsigned long datum, const char *header, int in_pages_p)
 
 /* Display assorted information about the underlying OS.  */
 static void
-go32_sysinfo (char *arg, int from_tty)
+go32_sysinfo (const char *arg, int from_tty)
 {
   static const char test_pattern[] =
     "deadbeafdeadbeafdeadbeafdeadbeafdeadbeaf"
@@ -1126,7 +1128,7 @@ go32_sysinfo (char *arg, int from_tty)
   /* CPUID with EAX = 1 returns processor signature and features.  */
   if (cpuid_max >= 1)
     {
-      static char *brand_name[] = {
+      static const char *brand_name[] = {
 	"",
 	" Celeron",
 	" III",
@@ -1656,7 +1658,7 @@ display_descriptor (unsigned type, unsigned long base_addr, int idx, int force)
 }
 
 static void
-go32_sldt (char *arg, int from_tty)
+go32_sldt (const char *arg, int from_tty)
 {
   struct dtr_reg gdtr;
   unsigned short ldtr = 0;
@@ -1729,7 +1731,7 @@ go32_sldt (char *arg, int from_tty)
 }
 
 static void
-go32_sgdt (char *arg, int from_tty)
+go32_sgdt (const char *arg, int from_tty)
 {
   struct dtr_reg gdtr;
   long gdt_entry = -1L;
@@ -1770,7 +1772,7 @@ go32_sgdt (char *arg, int from_tty)
 }
 
 static void
-go32_sidt (char *arg, int from_tty)
+go32_sidt (const char *arg, int from_tty)
 {
   struct dtr_reg idtr;
   long idt_entry = -1L;
@@ -1942,7 +1944,7 @@ display_ptable_entry (unsigned long entry, int is_dir, int force, unsigned off)
 }
 
 static void
-go32_pde (char *arg, int from_tty)
+go32_pde (const char *arg, int from_tty)
 {
   long pde_idx = -1, i;
 
@@ -1992,7 +1994,7 @@ display_page_table (long n, int force)
 }
 
 static void
-go32_pte (char *arg, int from_tty)
+go32_pte (const char *arg, int from_tty)
 {
   long pde_idx = -1L, i;
 
@@ -2019,7 +2021,7 @@ go32_pte (char *arg, int from_tty)
 }
 
 static void
-go32_pte_for_address (char *arg, int from_tty)
+go32_pte_for_address (const char *arg, int from_tty)
 {
   CORE_ADDR addr = 0, i;
 
@@ -2051,13 +2053,10 @@ go32_pte_for_address (char *arg, int from_tty)
 static struct cmd_list_element *info_dos_cmdlist = NULL;
 
 static void
-go32_info_dos_command (char *args, int from_tty)
+go32_info_dos_command (const char *args, int from_tty)
 {
   help_list (info_dos_cmdlist, "info dos ", class_info, gdb_stdout);
 }
-
-/* -Wmissing-prototypes */
-extern initialize_file_ftype _initialize_go32_nat;
 
 void
 _initialize_go32_nat (void)

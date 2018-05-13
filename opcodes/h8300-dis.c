@@ -1,5 +1,5 @@
 /* Disassemble h8300 instructions.
-   Copyright (C) 1993-2015 Free Software Foundation, Inc.
+   Copyright (C) 1993-2018 Free Software Foundation, Inc.
 
    This file is part of the GNU opcodes library.
 
@@ -23,7 +23,7 @@
 #include "sysdep.h"
 #define h8_opcodes h8ops
 #include "opcode/h8300.h"
-#include "dis-asm.h"
+#include "disassemble.h"
 #include "opintl.h"
 #include "libiberty.h"
 
@@ -543,10 +543,6 @@ bfd_h8_disassemble (bfd_vma addr, disassemble_info *info, int mach)
 		  cst[opnr] =
 		    (data[i] << 16) | (data[i + 1] << 8) | (data[i + 2]);
 		  cstlen[opnr] = 24;
-		}
-	      else if (looking_for & IGNORE)
-		{
-		  ;
 		}
 	      else if (looking_for & DISPREG)
 		{

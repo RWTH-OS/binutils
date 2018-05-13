@@ -1,5 +1,5 @@
-# Copyright (C) 2014-2015 Free Software Foundation, Inc.
-# 
+# Copyright (C) 2014-2018 Free Software Foundation, Inc.
+#
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
 # notice and this notice are preserved.
@@ -7,8 +7,8 @@
 HEAP_SECTION_MSP430=" "
 HEAP_MEMORY_MSP430=" "
 
-if test ${GOT_HEAP_MSP-0} -ne 0 
-then 
+if test ${GOT_HEAP_MSP-0} -ne 0
+then
 HEAP_SECTION_MSP430=".heap ${RELOCATING-0} :
   {
     ${RELOCATING+ PROVIDE (__heap_data_start = .) ; }
@@ -18,12 +18,12 @@ HEAP_SECTION_MSP430=".heap ${RELOCATING-0} :
     ${RELOCATING+ PROVIDE (__heap_bottom = .) ; }
     ${RELOCATING+ PROVIDE (__heap_top = ${HEAP_START} + ${HEAP_LENGTH}) ; }
   } ${RELOCATING+ > heap}"
-HEAP_MEMORY_MSP430="heap(rwx) 		: ORIGIN = $HEAP_START,	LENGTH = $HEAP_LENGTH"
+HEAP_MEMORY_MSP430="heap(rwx)		: ORIGIN = $HEAP_START,	LENGTH = $HEAP_LENGTH"
 fi
 
 
 cat <<EOF
-/* Copyright (C) 2014-2015 Free Software Foundation, Inc.
+/* Copyright (C) 2014-2018 Free Software Foundation, Inc.
 
    Copying and distribution of this script, with or without modification,
    are permitted in any medium without royalty provided the copyright
@@ -34,9 +34,9 @@ OUTPUT_ARCH(${ARCH})
 
 MEMORY
 {
-  text   (rx)   	: ORIGIN = $ROM_START,  LENGTH = $ROM_SIZE
-  data   (rwx)  	: ORIGIN = $RAM_START, 	LENGTH = $RAM_SIZE
-  vectors (rw)  	: ORIGIN = 0xffe0,      LENGTH = 0x20
+  text   (rx)		: ORIGIN = $ROM_START,  LENGTH = $ROM_SIZE
+  data   (rwx)		: ORIGIN = $RAM_START,	LENGTH = $RAM_SIZE
+  vectors (rw)		: ORIGIN = 0xffe0,      LENGTH = 0x20
   bootloader(rx)	: ORIGIN = 0x0c00,	LENGTH = 1K
   infomem(rx)		: ORIGIN = 0x1000,	LENGTH = 256
   infomemnobits(rx)	: ORIGIN = 0x1000,      LENGTH = 256
@@ -53,7 +53,7 @@ SECTIONS
     ${RELOCATING+. = ALIGN(2);}
     *(.bootloader.*)
   } ${RELOCATING+ > bootloader}
-  
+
   /* Information memory.  */
   .infomem ${RELOCATING-0} :
   {
@@ -210,7 +210,6 @@ SECTIONS
     KEEP (*(.fini_array))
     KEEP (*(SORT(.fini_array.*)))
     PROVIDE (__fini_array_end = .);
-    LONG(0); /* Sentinel.  */
 
     /* gcc uses crtbegin.o to find the start of the constructors, so
        we make sure it is first.  Because this is a wildcard, it
@@ -269,10 +268,14 @@ SECTIONS
     ${RELOCATING+ _edata = . ; }
   } ${RELOCATING+ > data ${RELOCATING+AT> text}}
 
+  __romdatastart = LOADADDR(.data);
+  __romdatacopysize = SIZEOF(.data);
+
   .bss ${RELOCATING+ SIZEOF(.data) + ADDR(.data)} :
   {
     ${RELOCATING+. = ALIGN(2);}
-    ${RELOCATING+ PROVIDE (__bss_start = .) ; }
+    ${RELOCATING+ PROVIDE (__bss_start = .); }
+    ${RELOCATING+ PROVIDE (__bssstart = .); }
     *(.lower.bss.* .lower.bss)
     ${RELOCATING+. = ALIGN(2);}
     *(.bss)
@@ -280,6 +283,7 @@ SECTIONS
     *(COMMON)
     ${RELOCATING+ PROVIDE (__bss_end = .) ; }
   } ${RELOCATING+ > data}
+  ${RELOCATING+ PROVIDE (__bsssize = SIZEOF(.bss)); }
 
   .noinit ${RELOCATING+ SIZEOF(.bss) + ADDR(.bss)} :
   {
@@ -300,9 +304,9 @@ SECTIONS
 
   /* Stabs for profiling information*/
   .profiler 0 : { *(.profiler) }
-  
+
   /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) } 
+  .stab 0 : { *(.stab) }
   .stabstr 0 : { *(.stabstr) }
   .stab.excl 0 : { *(.stab.excl) }
   .stab.exclstr 0 : { *(.stab.exclstr) }
@@ -311,10 +315,10 @@ SECTIONS
   .comment 0 : { *(.comment) }
 EOF
 
-source $srcdir/scripttempl/DWARF.sc
+. $srcdir/scripttempl/DWARF.sc
 
 cat <<EOF
-  .MP430.attributes 0 :
+  .MSP430.attributes 0 :
   {
     KEEP (*(.MSP430.attributes))
     KEEP (*(.gnu.attributes))

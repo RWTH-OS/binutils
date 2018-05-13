@@ -1,5 +1,5 @@
 /* GNU/Linux/Xtensa specific low level interface, for the remote server for GDB.
-   Copyright (C) 2007-2015 Free Software Foundation, Inc.
+   Copyright (C) 2007-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -36,6 +36,7 @@ enum regnum {
 	R_LBEG,	R_LEND,	R_LCOUNT,
 	R_SAR,
 	R_WS, R_WB,
+	R_THREADPTR,
 	R_A0 = 64
 };
 
@@ -59,6 +60,20 @@ xtensa_fill_gregset (struct regcache *regcache, void *buf)
       ptr += register_size (tdesc, i);
     }
 
+  if (XSHAL_ABI == XTHAL_ABI_CALL0)
+    {
+      int a0_regnum = find_regno (tdesc, "a0");
+      ptr = (char *) &rset[R_A0 + 4 * rset[R_WB]];
+
+      for (i = a0_regnum; i < a0_regnum + C0_NREGS; i++)
+	{
+	  if ((4 * rset[R_WB] + i - a0_regnum) == XCHAL_NUM_AREGS)
+	    ptr = (char *) &rset[R_A0];
+	  collect_register (regcache, i, ptr);
+	  ptr += register_size (tdesc, i);
+	}
+    }
+
   /* Loop registers, if hardware has it.  */
 
 #if XCHAL_HAVE_LOOPS
@@ -72,6 +87,11 @@ xtensa_fill_gregset (struct regcache *regcache, void *buf)
   collect_register_by_name (regcache, "ps", (char*)&rset[R_PS]);
   collect_register_by_name (regcache, "windowbase", (char*)&rset[R_WB]);
   collect_register_by_name (regcache, "windowstart", (char*)&rset[R_WS]);
+
+#if XCHAL_HAVE_THREADPTR
+  collect_register_by_name (regcache, "threadptr",
+			    (char *) &rset[R_THREADPTR]);
+#endif
 }
 
 static void
@@ -94,6 +114,20 @@ xtensa_store_gregset (struct regcache *regcache, const void *buf)
       ptr += register_size (tdesc, i);
     }
 
+  if (XSHAL_ABI == XTHAL_ABI_CALL0)
+    {
+      int a0_regnum = find_regno (tdesc, "a0");
+      ptr = (char *) &rset[R_A0 + (4 * rset[R_WB]) % XCHAL_NUM_AREGS];
+
+      for (i = a0_regnum; i < a0_regnum + C0_NREGS; i++)
+	{
+	  if ((4 * rset[R_WB] + i - a0_regnum) == XCHAL_NUM_AREGS)
+	    ptr = (char *) &rset[R_A0];
+	  supply_register (regcache, i, ptr);
+	  ptr += register_size (tdesc, i);
+	}
+    }
+
   /* Loop registers, if hardware has it.  */
 
 #if XCHAL_HAVE_LOOPS
@@ -107,6 +141,11 @@ xtensa_store_gregset (struct regcache *regcache, const void *buf)
   supply_register_by_name (regcache, "ps", (char*)&rset[R_PS]);
   supply_register_by_name (regcache, "windowbase", (char*)&rset[R_WB]);
   supply_register_by_name (regcache, "windowstart", (char*)&rset[R_WS]);
+
+#if XCHAL_HAVE_THREADPTR
+  supply_register_by_name (regcache, "threadptr",
+			   (char *) &rset[R_THREADPTR]);
+#endif
 }
 
 /* Xtensa GNU/Linux PTRACE interface includes extended register set.  */
@@ -163,22 +202,6 @@ xtensa_sw_breakpoint_from_kind (int kind, int *size)
   return xtensa_breakpoint;
 }
 
-static CORE_ADDR
-xtensa_get_pc (struct regcache *regcache)
-{
-  unsigned long pc;
-
-  collect_register_by_name (regcache, "pc", &pc);
-  return pc;
-}
-
-static void
-xtensa_set_pc (struct regcache *regcache, CORE_ADDR pc)
-{
-  unsigned long newpc = pc;
-  supply_register_by_name (regcache, "pc", &newpc);
-}
-
 static int
 xtensa_breakpoint_at (CORE_ADDR where)
 {
@@ -193,7 +216,7 @@ xtensa_breakpoint_at (CORE_ADDR where)
 /* Called by libthread_db.  */
 
 ps_err_e
-ps_get_thread_area (const struct ps_prochandle *ph,
+ps_get_thread_area (struct ps_prochandle *ph,
                     lwpid_t lwpid, int idx, void **base)
 {
   xtensa_elf_gregset_t regs;
@@ -229,6 +252,14 @@ xtensa_arch_setup (void)
   current_process ()->tdesc = tdesc_xtensa;
 }
 
+/* Support for hardware single step.  */
+
+static int
+xtensa_supports_hardware_single_step (void)
+{
+  return 1;
+}
+
 static const struct regs_info *
 xtensa_regs_info (void)
 {
@@ -241,13 +272,36 @@ struct linux_target_ops the_low_target = {
   0,
   0,
   NULL, /* fetch_register */
-  xtensa_get_pc,
-  xtensa_set_pc,
+  linux_get_pc_32bit,
+  linux_set_pc_32bit,
   NULL, /* breakpoint_kind_from_pc */
   xtensa_sw_breakpoint_from_kind,
   NULL,
   0,
   xtensa_breakpoint_at,
+  NULL, /* supports_z_point_type */
+  NULL, /* insert_point */
+  NULL, /* remove_point */
+  NULL, /* stopped_by_watchpoint */
+  NULL, /* stopped_data_address */
+  NULL, /* collect_ptrace_register */
+  NULL, /* supply_ptrace_register */
+  NULL, /* siginfo_fixup */
+  NULL, /* new_process */
+  NULL, /* delete_process */
+  NULL, /* new_thread */
+  NULL, /* delete_thread */
+  NULL, /* new_fork */
+  NULL, /* prepare_to_resume */
+  NULL, /* process_qsupported */
+  NULL, /* supports_tracepoints */
+  NULL, /* get_thread_area */
+  NULL, /* install_fast_tracepoint_jump_pad */
+  NULL, /* emit_ops */
+  NULL, /* get_min_fast_tracepoint_insn_len */
+  NULL, /* supports_range_stepping */
+  NULL, /* breakpoint_kind_from_current_state */
+  xtensa_supports_hardware_single_step,
 };
 
 

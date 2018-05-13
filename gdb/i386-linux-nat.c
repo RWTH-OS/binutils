@@ -1,6 +1,6 @@
 /* Native-dependent code for GNU/Linux i386.
 
-   Copyright (C) 1999-2015 Free Software Foundation, Inc.
+   Copyright (C) 1999-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -36,6 +36,7 @@
 #include "linux-nat.h"
 #include "x86-linux-nat.h"
 #include "nat/linux-ptrace.h"
+#include "inf-ptrace.h"
 
 /* The register sets used in GNU/Linux ELF core-dumps are identical to
    the register sets in `struct user' that is used for a.out
@@ -59,7 +60,7 @@
   (I386_ST0_REGNUM <= (regno) && (regno) < I386_SSE_NUM_REGS)
 
 #define GETXSTATEREGS_SUPPLIES(regno) \
-  (I386_ST0_REGNUM <= (regno) && (regno) < I386_AVX512_NUM_REGS)
+  (I386_ST0_REGNUM <= (regno) && (regno) < I386_PKEYS_NUM_REGS)
 
 /* Does the current host support the GETREGS request?  */
 int have_ptrace_getregs =
@@ -94,7 +95,7 @@ int have_ptrace_getfpxregs =
 static void
 fetch_register (struct regcache *regcache, int regno)
 {
-  int tid;
+  pid_t tid;
   int val;
 
   gdb_assert (!have_ptrace_getregs);
@@ -104,17 +105,14 @@ fetch_register (struct regcache *regcache, int regno)
       return;
     }
 
-  /* GNU/Linux LWP ID's are process ID's.  */
-  tid = ptid_get_lwp (inferior_ptid);
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid); /* Not a threaded program.  */
+  tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   errno = 0;
   val = ptrace (PTRACE_PEEKUSER, tid,
 		i386_linux_gregset_reg_offset[regno], 0);
   if (errno != 0)
     error (_("Couldn't read register %s (#%d): %s."), 
-	   gdbarch_register_name (get_regcache_arch (regcache), regno),
+	   gdbarch_register_name (regcache->arch (), regno),
 	   regno, safe_strerror (errno));
 
   regcache_raw_supply (regcache, regno, &val);
@@ -125,17 +123,14 @@ fetch_register (struct regcache *regcache, int regno)
 static void
 store_register (const struct regcache *regcache, int regno)
 {
-  int tid;
+  pid_t tid;
   int val;
 
   gdb_assert (!have_ptrace_getregs);
   if (i386_linux_gregset_reg_offset[regno] == -1)
     return;
 
-  /* GNU/Linux LWP ID's are process ID's.  */
-  tid = ptid_get_lwp (inferior_ptid);
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid); /* Not a threaded program.  */
+  tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   errno = 0;
   regcache_raw_collect (regcache, regno, &val);
@@ -143,7 +138,7 @@ store_register (const struct regcache *regcache, int regno)
 	  i386_linux_gregset_reg_offset[regno], val);
   if (errno != 0)
     error (_("Couldn't write register %s (#%d): %s."),
-	   gdbarch_register_name (get_regcache_arch (regcache), regno),
+	   gdbarch_register_name (regcache->arch (), regno),
 	   regno, safe_strerror (errno));
 }
 
@@ -165,7 +160,7 @@ supply_gregset (struct regcache *regcache, const elf_gregset_t *gregsetp)
 			 regp + i386_linux_gregset_reg_offset[i]);
 
   if (I386_LINUX_ORIG_EAX_REGNUM
-	< gdbarch_num_regs (get_regcache_arch (regcache)))
+	< gdbarch_num_regs (regcache->arch ()))
     regcache_raw_supply (regcache, I386_LINUX_ORIG_EAX_REGNUM, regp
 			 + i386_linux_gregset_reg_offset[I386_LINUX_ORIG_EAX_REGNUM]);
 }
@@ -188,7 +183,7 @@ fill_gregset (const struct regcache *regcache,
 
   if ((regno == -1 || regno == I386_LINUX_ORIG_EAX_REGNUM)
       && I386_LINUX_ORIG_EAX_REGNUM
-	   < gdbarch_num_regs (get_regcache_arch (regcache)))
+	   < gdbarch_num_regs (regcache->arch ()))
     regcache_raw_collect (regcache, I386_LINUX_ORIG_EAX_REGNUM, regp
 			  + i386_linux_gregset_reg_offset[I386_LINUX_ORIG_EAX_REGNUM]);
 }
@@ -455,7 +450,7 @@ static void
 i386_linux_fetch_inferior_registers (struct target_ops *ops,
 				     struct regcache *regcache, int regno)
 {
-  int tid;
+  pid_t tid;
 
   /* Use the old method of peeking around in `struct user' if the
      GETREGS request isn't available.  */
@@ -463,17 +458,14 @@ i386_linux_fetch_inferior_registers (struct target_ops *ops,
     {
       int i;
 
-      for (i = 0; i < gdbarch_num_regs (get_regcache_arch (regcache)); i++)
+      for (i = 0; i < gdbarch_num_regs (regcache->arch ()); i++)
 	if (regno == -1 || regno == i)
 	  fetch_register (regcache, i);
 
       return;
     }
 
-  /* GNU/Linux LWP ID's are process ID's.  */
-  tid = ptid_get_lwp (inferior_ptid);
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid); /* Not a threaded program.  */
+  tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   /* Use the PTRACE_GETFPXREGS request whenever possible, since it
      transfers more registers in one system call, and we'll cache the
@@ -536,7 +528,7 @@ static void
 i386_linux_store_inferior_registers (struct target_ops *ops,
 				     struct regcache *regcache, int regno)
 {
-  int tid;
+  pid_t tid;
 
   /* Use the old method of poking around in `struct user' if the
      SETREGS request isn't available.  */
@@ -544,17 +536,14 @@ i386_linux_store_inferior_registers (struct target_ops *ops,
     {
       int i;
 
-      for (i = 0; i < gdbarch_num_regs (get_regcache_arch (regcache)); i++)
+      for (i = 0; i < gdbarch_num_regs (regcache->arch ()); i++)
 	if (regno == -1 || regno == i)
 	  store_register (regcache, i);
 
       return;
     }
 
-  /* GNU/Linux LWP ID's are process ID's.  */
-  tid = ptid_get_lwp (inferior_ptid);
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid); /* Not a threaded program.  */
+  tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   /* Use the PTRACE_SETFPXREGS requests whenever possible, since it
      transfers more registers in one system call.  But remember that
@@ -603,7 +592,7 @@ i386_linux_store_inferior_registers (struct target_ops *ops,
    storage (or its descriptor).  */
 
 ps_err_e
-ps_get_thread_area (const struct ps_prochandle *ph,
+ps_get_thread_area (struct ps_prochandle *ph,
 		    lwpid_t lwpid, int idx, void **base)
 {
   unsigned int base_addr;
@@ -661,7 +650,7 @@ i386_linux_resume (struct target_ops *ops,
   if (step)
     {
       struct regcache *regcache = get_thread_regcache (ptid);
-      struct gdbarch *gdbarch = get_regcache_arch (regcache);
+      struct gdbarch *gdbarch = regcache->arch ();
       enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);
       ULONGEST pc;
       gdb_byte buf[LINUX_SYSCALL_LEN];
@@ -713,10 +702,6 @@ i386_linux_resume (struct target_ops *ops,
   if (ptrace (request, pid, 0, gdb_signal_to_host (signal)) == -1)
     perror_with_name (("ptrace"));
 }
-
-
-/* -Wmissing-prototypes */
-extern initialize_file_ftype _initialize_i386_linux_nat;
 
 void
 _initialize_i386_linux_nat (void)

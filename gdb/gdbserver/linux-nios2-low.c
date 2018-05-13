@@ -1,6 +1,6 @@
 /* GNU/Linux/Nios II specific low level interface, for the remote server for
    GDB.
-   Copyright (C) 2008-2015 Free Software Foundation, Inc.
+   Copyright (C) 2008-2018 Free Software Foundation, Inc.
 
    Contributed by Mentor Graphics, Inc.
 
@@ -95,28 +95,6 @@ nios2_cannot_store_register (int regno)
   return 0;
 }
 
-/* Implement the get_pc linux_target_ops method.  */
-
-static CORE_ADDR
-nios2_get_pc (struct regcache *regcache)
-{
-  union nios2_register pc;
-
-  collect_register_by_name (regcache, "pc", pc.buf);
-  return pc.reg32;
-}
-
-/* Implement the set_pc linux_target_ops method.  */
-
-static void
-nios2_set_pc (struct regcache *regcache, CORE_ADDR pc)
-{
-  union nios2_register newpc;
-
-  newpc.reg32 = pc;
-  supply_register_by_name (regcache, "pc", newpc.buf);
-}
-
 /* Breakpoint support.  Also see comments on nios2_breakpoint_from_pc
    in nios2-tdep.c.  */
 
@@ -144,18 +122,6 @@ nios2_sw_breakpoint_from_kind (int kind, int *size)
   return (const gdb_byte *) &nios2_breakpoint;
 }
 
-/* Implement the breakpoint_reinsert_addr linux_target_ops method.  */
-
-static CORE_ADDR
-nios2_reinsert_addr (void)
-{
-  union nios2_register ra;
-  struct regcache *regcache = get_thread_regcache (current_thread, 1);
-
-  collect_register_by_name (regcache, "ra", ra.buf);
-  return ra.reg32;
-}
-
 /* Implement the breakpoint_at linux_target_ops method.  */
 
 static int
@@ -179,7 +145,7 @@ nios2_breakpoint_at (CORE_ADDR where)
 /* Fetch the thread-local storage pointer for libthread_db.  */
 
 ps_err_e
-ps_get_thread_area (const struct ps_prochandle *ph,
+ps_get_thread_area (struct ps_prochandle *ph,
                     lwpid_t lwpid, int idx, void **base)
 {
   if (ptrace (PTRACE_GET_THREAD_AREA, lwpid, NULL, base) != 0)
@@ -217,7 +183,7 @@ nios2_supply_register (struct regcache *regcache, int regno,
 static void
 nios2_fill_gregset (struct regcache *regcache, void *buf)
 {
-  union nios2_register *regset = buf;
+  union nios2_register *regset = (union nios2_register *) buf;
   int i;
 
   for (i = 1; i < nios2_num_regs; i++)
@@ -227,7 +193,7 @@ nios2_fill_gregset (struct regcache *regcache, void *buf)
 static void
 nios2_store_gregset (struct regcache *regcache, const void *buf)
 {
-  const union nios2_register *regset = buf;
+  const union nios2_register *regset = (union nios2_register *) buf;
   int i;
 
   for (i = 0; i < nios2_num_regs; i++)
@@ -275,11 +241,11 @@ struct linux_target_ops the_low_target =
   nios2_cannot_fetch_register,
   nios2_cannot_store_register,
   NULL,
-  nios2_get_pc,
-  nios2_set_pc,
+  linux_get_pc_32bit,
+  linux_set_pc_32bit,
   NULL, /* breakpoint_kind_from_pc */
   nios2_sw_breakpoint_from_kind,
-  nios2_reinsert_addr,
+  NULL, /* get_next_pcs */
   0,
   nios2_breakpoint_at,
 };

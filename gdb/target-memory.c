@@ -1,7 +1,7 @@
 /* Parts of target interface that deal with accessing memory and memory-like
    objects.
 
-   Copyright (C) 2006-2015 Free Software Foundation, Inc.
+   Copyright (C) 2006-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -24,6 +24,7 @@
 #include "memory-map.h"
 
 #include "gdb_sys_time.h"
+#include <algorithm>
 
 static int
 compare_block_starting_address (const void *a, const void *b)
@@ -71,11 +72,11 @@ claim_memory (VEC(memory_write_request_s) *blocks,
       if (end != 0 && end <= r->begin)
 	continue;
 
-      claimed_begin = max (begin, r->begin);
+      claimed_begin = std::max (begin, r->begin);
       if (end == 0)
 	claimed_end = r->end;
       else
-	claimed_end = min (end, r->end);
+	claimed_end = std::min (end, r->end);
 
       if (claimed_begin == r->begin && claimed_end == r->end)
 	VEC_safe_push (memory_write_request_s, *result, r);
@@ -137,14 +138,18 @@ block_boundaries (CORE_ADDR address, CORE_ADDR *begin, CORE_ADDR *end)
 {
   struct mem_region *region;
   unsigned blocksize;
+  CORE_ADDR offset_in_region;
 
   region = lookup_mem_region (address);
   gdb_assert (region->attrib.mode == MEM_FLASH);
   blocksize = region->attrib.blocksize;
+
+  offset_in_region = address - region->lo;
+
   if (begin)
-    *begin = address / blocksize * blocksize;
+    *begin = region->lo + offset_in_region / blocksize * blocksize;
   if (end)
-    *end = (address + blocksize - 1) / blocksize * blocksize;
+    *end = region->lo + (offset_in_region + blocksize - 1) / blocksize * blocksize;
 }
 
 /* Given the list of memory requests to be WRITTEN, this function

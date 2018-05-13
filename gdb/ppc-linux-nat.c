@@ -1,6 +1,6 @@
 /* PPC GNU/Linux native support.
 
-   Copyright (C) 1988-2015 Free Software Foundation, Inc.
+   Copyright (C) 1988-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -34,6 +34,7 @@
 #include <fcntl.h>
 #include <sys/procfs.h>
 #include "nat/gdb_ptrace.h"
+#include "inf-ptrace.h"
 
 /* Prototypes for supply_gregset etc.  */
 #include "gregset.h"
@@ -358,7 +359,7 @@ fetch_vsx_register (struct regcache *regcache, int tid, int regno)
 {
   int ret;
   gdb_vsxregset_t regs;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);
 
@@ -387,7 +388,7 @@ fetch_altivec_register (struct regcache *regcache, int tid, int regno)
   int ret;
   int offset = 0;
   gdb_vrregset_t regs;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);
 
@@ -451,7 +452,7 @@ get_spe_registers (int tid, struct gdb_evrregset_t *evrregset)
 static void
 fetch_spe_register (struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   struct gdb_evrregset_t evrregs;
 
@@ -490,13 +491,13 @@ fetch_spe_register (struct regcache *regcache, int tid, int regno)
 static void
 fetch_register (struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   /* This isn't really an address.  But ptrace thinks of it as one.  */
   CORE_ADDR regaddr = ppc_register_u_addr (gdbarch, regno);
   int bytes_transferred;
   unsigned int offset;         /* Offset of registers within the u area.  */
-  gdb_byte buf[MAX_REGISTER_SIZE];
+  gdb_byte buf[PPC_MAX_REGISTER_SIZE];
 
   if (altivec_register_p (gdbarch, regno))
     {
@@ -582,7 +583,7 @@ static void
 supply_vsxregset (struct regcache *regcache, gdb_vsxregset_t *vsxregsetp)
 {
   int i;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);
 
@@ -597,7 +598,7 @@ static void
 supply_vrregset (struct regcache *regcache, gdb_vrregset_t *vrregsetp)
 {
   int i;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int num_of_vrregs = tdep->ppc_vrsave_regnum - tdep->ppc_vr0_regnum + 1;
   int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);
@@ -667,7 +668,7 @@ fetch_altivec_registers (struct regcache *regcache, int tid)
 static int
 fetch_all_gp_regs (struct regcache *regcache, int tid)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   gdb_gregset_t gregset;
 
@@ -695,7 +696,7 @@ fetch_all_gp_regs (struct regcache *regcache, int tid)
 static void
 fetch_gp_regs (struct regcache *regcache, int tid)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int i;
 
@@ -747,7 +748,7 @@ fetch_all_fp_regs (struct regcache *regcache, int tid)
 static void
 fetch_fp_regs (struct regcache *regcache, int tid)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int i;
 
@@ -766,7 +767,7 @@ static void
 fetch_ppc_registers (struct regcache *regcache, int tid)
 {
   int i;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
 
   fetch_gp_regs (regcache, tid);
@@ -809,12 +810,7 @@ static void
 ppc_linux_fetch_inferior_registers (struct target_ops *ops,
 				    struct regcache *regcache, int regno)
 {
-  /* Overload thread id onto process id.  */
-  int tid = ptid_get_lwp (inferior_ptid);
-
-  /* No thread id, just use process id.  */
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid);
+  pid_t tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   if (regno == -1)
     fetch_ppc_registers (regcache, tid);
@@ -828,7 +824,7 @@ store_vsx_register (const struct regcache *regcache, int tid, int regno)
 {
   int ret;
   gdb_vsxregset_t regs;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);
 
@@ -858,7 +854,7 @@ store_altivec_register (const struct regcache *regcache, int tid, int regno)
   int ret;
   int offset = 0;
   gdb_vrregset_t regs;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);
 
@@ -922,7 +918,7 @@ set_spe_registers (int tid, struct gdb_evrregset_t *evrregset)
 static void
 store_spe_register (const struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   struct gdb_evrregset_t evrregs;
 
@@ -977,13 +973,13 @@ store_spe_register (const struct regcache *regcache, int tid, int regno)
 static void
 store_register (const struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   /* This isn't really an address.  But ptrace thinks of it as one.  */
   CORE_ADDR regaddr = ppc_register_u_addr (gdbarch, regno);
   int i;
   size_t bytes_to_transfer;
-  gdb_byte buf[MAX_REGISTER_SIZE];
+  gdb_byte buf[PPC_MAX_REGISTER_SIZE];
 
   if (altivec_register_p (gdbarch, regno))
     {
@@ -1054,7 +1050,7 @@ static void
 fill_vsxregset (const struct regcache *regcache, gdb_vsxregset_t *vsxregsetp)
 {
   int i;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);
 
@@ -1067,7 +1063,7 @@ static void
 fill_vrregset (const struct regcache *regcache, gdb_vrregset_t *vrregsetp)
 {
   int i;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int num_of_vrregs = tdep->ppc_vrsave_regnum - tdep->ppc_vr0_regnum + 1;
   int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);
@@ -1143,7 +1139,7 @@ store_altivec_registers (const struct regcache *regcache, int tid)
 static int
 store_all_gp_regs (const struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   gdb_gregset_t gregset;
 
@@ -1181,7 +1177,7 @@ store_all_gp_regs (const struct regcache *regcache, int tid, int regno)
 static void
 store_gp_regs (const struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int i;
 
@@ -1243,7 +1239,7 @@ store_all_fp_regs (const struct regcache *regcache, int tid, int regno)
 static void
 store_fp_regs (const struct regcache *regcache, int tid, int regno)
 {
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
   int i;
 
@@ -1262,7 +1258,7 @@ static void
 store_ppc_registers (const struct regcache *regcache, int tid)
 {
   int i;
-  struct gdbarch *gdbarch = get_regcache_arch (regcache);
+  struct gdbarch *gdbarch = regcache->arch ();
   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
  
   store_gp_regs (regcache, tid, -1);
@@ -1545,16 +1541,13 @@ hwdebug_insert_point (struct ppc_hw_breakpoint *b, int tid)
 {
   int i;
   long slot;
-  struct ppc_hw_breakpoint *p = XNEW (struct ppc_hw_breakpoint);
+  gdb::unique_xmalloc_ptr<ppc_hw_breakpoint> p (XDUP (ppc_hw_breakpoint, b));
   struct hw_break_tuple *hw_breaks;
-  struct cleanup *c = make_cleanup (xfree, p);
   struct thread_points *t;
   struct hw_break_tuple *tuple;
 
-  memcpy (p, b, sizeof (struct ppc_hw_breakpoint));
-
   errno = 0;
-  slot = ptrace (PPC_PTRACE_SETHWDEBUG, tid, 0, p);
+  slot = ptrace (PPC_PTRACE_SETHWDEBUG, tid, 0, p.get ());
   if (slot < 0)
     perror_with_name (_("Unexpected error setting breakpoint or watchpoint"));
 
@@ -1568,13 +1561,11 @@ hwdebug_insert_point (struct ppc_hw_breakpoint *b, int tid)
     if (hw_breaks[i].hw_break == NULL)
       {
 	hw_breaks[i].slot = slot;
-	hw_breaks[i].hw_break = p;
+	hw_breaks[i].hw_break = p.release ();
 	break;
       }
 
   gdb_assert (i != max_slots_number);
-
-  discard_cleanups (c);
 }
 
 /* This function is a generic wrapper that is responsible for removing a
@@ -2291,12 +2282,7 @@ static void
 ppc_linux_store_inferior_registers (struct target_ops *ops,
 				    struct regcache *regcache, int regno)
 {
-  /* Overload thread id onto process id.  */
-  int tid = ptid_get_lwp (inferior_ptid);
-
-  /* No thread id, just use process id.  */
-  if (tid == 0)
-    tid = ptid_get_pid (inferior_ptid);
+  pid_t tid = get_ptrace_pid (regcache_get_ptid (regcache));
 
   if (regno >= 0)
     store_register (regcache, tid, regno);
@@ -2419,7 +2405,8 @@ ppc_linux_read_description (struct target_ops *ops)
 	perror_with_name (_("Unable to fetch SPE registers"));
     }
 
-  if (have_ptrace_getsetvsxregs)
+  if (have_ptrace_getsetvsxregs
+      && (ppc_linux_get_hwcap () & PPC_FEATURE_HAS_VSX))
     {
       gdb_vsxregset_t vsxregset;
 
@@ -2432,7 +2419,8 @@ ppc_linux_read_description (struct target_ops *ops)
 	perror_with_name (_("Unable to fetch VSX registers"));
     }
 
-  if (have_ptrace_getvrregs)
+  if (have_ptrace_getvrregs
+      && (ppc_linux_get_hwcap () & PPC_FEATURE_HAS_ALTIVEC))
     {
       gdb_vrregset_t vrregset;
 
@@ -2479,8 +2467,6 @@ ppc_linux_read_description (struct target_ops *ops)
 
   return isa205? tdesc_powerpc_isa205_32l : tdesc_powerpc_32l;
 }
-
-void _initialize_ppc_linux_nat (void);
 
 void
 _initialize_ppc_linux_nat (void)

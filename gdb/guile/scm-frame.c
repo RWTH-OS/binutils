@@ -1,6 +1,6 @@
 /* Scheme interface to stack frames.
 
-   Copyright (C) 2008-2015 Free Software Foundation, Inc.
+   Copyright (C) 2008-2018 Free Software Foundation, Inc.
 
    This file is part of GDB.
 
@@ -156,17 +156,12 @@ static int
 frscm_print_frame_smob (SCM self, SCM port, scm_print_state *pstate)
 {
   frame_smob *f_smob = (frame_smob *) SCM_SMOB_DATA (self);
-  struct ui_file *strfile;
-  char *s;
 
   gdbscm_printf (port, "#<%s ", frame_smob_name);
 
-  strfile = mem_fileopen ();
-  fprint_frame_id (strfile, f_smob->frame_id);
-  s = ui_file_xstrdup (strfile, NULL);
-  gdbscm_printf (port, "%s", s);
-  ui_file_delete (strfile);
-  xfree (s);
+  string_file strfile;
+  fprint_frame_id (&strfile, f_smob->frame_id);
+  gdbscm_printf (port, "%s", strfile.c_str ());
 
   scm_puts (">", port);
 
@@ -423,7 +418,7 @@ static SCM
 gdbscm_frame_name (SCM self)
 {
   frame_smob *f_smob;
-  char *name = NULL;
+  gdb::unique_xmalloc_ptr<char> name;
   enum language lang = language_minimal;
   struct frame_info *frame = NULL;
   SCM result;
@@ -434,11 +429,10 @@ gdbscm_frame_name (SCM self)
     {
       frame = frscm_frame_smob_to_frame (f_smob);
       if (frame != NULL)
-	find_frame_funname (frame, &name, &lang, NULL);
+	name = find_frame_funname (frame, &lang, NULL);
     }
   CATCH (except, RETURN_MASK_ALL)
     {
-      xfree (name);
       GDBSCM_HANDLE_GDB_EXCEPTION (except);
     }
   END_CATCH
@@ -450,10 +444,7 @@ gdbscm_frame_name (SCM self)
     }
 
   if (name != NULL)
-    {
-      result = gdbscm_scm_from_c_string (name);
-      xfree (name);
-    }
+    result = gdbscm_scm_from_c_string (name.get ());
   else
     result = SCM_BOOL_F;
 
@@ -766,7 +757,7 @@ gdbscm_frame_sal (SCM self)
     {
       frame = frscm_frame_smob_to_frame (f_smob);
       if (frame != NULL)
-	find_frame_sal (frame, &sal);
+	sal = find_frame_sal (frame);
     }
   CATCH (except, RETURN_MASK_ALL)
     {
@@ -849,7 +840,6 @@ static SCM
 gdbscm_frame_read_var (SCM self, SCM symbol_scm, SCM rest)
 {
   SCM keywords[] = { block_keyword, SCM_BOOL_F };
-  int rc;
   frame_smob *f_smob;
   int block_arg_pos = -1;
   SCM block_scm = SCM_UNDEFINED;
